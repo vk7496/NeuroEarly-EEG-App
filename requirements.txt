@@ -4,3 +4,4 @@ pandas>=2.0
 matplotlib>=3.6
 mne>=1.2
 reportlab>=3.6
+scipy
