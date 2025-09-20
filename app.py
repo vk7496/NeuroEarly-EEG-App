@@ -1,17 +1,16 @@
-import os
 import io
 import json
 import tempfile
-import requests
 from datetime import datetime
 
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
 import mne
-
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
+import requests
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
+)
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.pdfbase import pdfmetrics
@@ -28,10 +27,9 @@ TEXTS = {
         "upload": "1) Upload EEG file (.edf)",
         "phq9": "2) Depression Screening — PHQ-9",
         "ad8": "3) Cognitive Screening — AD8",
-        "report": "4) Generate Reports (JSON / CSV / PDF)",
+        "report": "4) Generate Report",
         "download_json": "⬇️ Download JSON",
         "download_pdf": "⬇️ Download PDF",
-        "download_csv": "⬇️ Download CSV (features)",
         "note": "⚠️ Research demo only — Not a clinical diagnostic tool.",
         "phq9_questions": [
             "Little interest or pleasure in doing things",
@@ -41,11 +39,12 @@ TEXTS = {
             "Poor appetite or overeating",
             "Feeling bad about yourself or feeling like a failure",
             "Trouble concentrating (e.g., reading, watching TV)",
-            "Moving or speaking slowly — OR being unusually restless",
+            "Speaking slowly or being unusually restless",
             "Thoughts of being better off dead or self-harm"
         ],
         "phq9_options": [
-            "0 = Not at all", "1 = Several days", "2 = More than half the days", "3 = Nearly every day"
+            "0 = Not at all", "1 = Several days",
+            "2 = More than half the days", "3 = Nearly every day"
         ],
         "ad8_questions": [
             "Problems with judgment (e.g., poor financial decisions)",
@@ -65,10 +64,9 @@ TEXTS = {
         "upload": "١) تحميل ملف تخطيط الدماغ (.edf)",
         "phq9": "٢) فحص الاكتئاب — PHQ-9",
         "ad8": "٣) الفحص المعرفي — AD8",
-        "report": "٤) إنشاء التقارير (JSON / CSV / PDF)",
+        "report": "٤) إنشاء التقرير",
         "download_json": "⬇️ تنزيل JSON",
         "download_pdf": "⬇️ تنزيل PDF",
-        "download_csv": "⬇️ تنزيل CSV (الميزات)",
         "note": "⚠️ هذا نموذج بحثي فقط — ليس أداة تشخيص سريري.",
         "phq9_questions": [
             "قلة الاهتمام أو المتعة في القيام بالأنشطة",
@@ -78,11 +76,12 @@ TEXTS = {
             "فقدان الشهية أو الإفراط في الأكل",
             "الشعور بأنك شخص سيء أو فاشل",
             "صعوبة في التركيز (مثل القراءة أو مشاهدة التلفاز)",
-            "الحركة أو الكلام ببطء شديد — أو فرط الحركة",
+            "الكلام ببطء شديد أو فرط الحركة غير المعتاد",
             "أفكار بأنك أفضل حالاً ميتاً أو أفكار إيذاء النفس"
         ],
         "phq9_options": [
-            "0 = أبداً", "1 = عدة أيام", "2 = أكثر من نصف الأيام", "3 = كل يوم تقريباً"
+            "0 = أبداً", "1 = عدة أيام",
+            "2 = أكثر من نصف الأيام", "3 = كل يوم تقريباً"
         ],
         "ad8_questions": [
             "مشاكل في الحكم أو اتخاذ القرارات",
@@ -99,27 +98,22 @@ TEXTS = {
 }
 
 # ---------------------------
-# Font setup (Amiri for Arabic)
+# Arabic Font (in-memory)
 # ---------------------------
-FONT_DIR = "fonts"
-FONT_PATH = os.path.join(FONT_DIR, "Amiri-Regular.ttf")
-
 def ensure_amiri():
-    os.makedirs(FONT_DIR, exist_ok=True)
-    if not os.path.exists(FONT_PATH):
-        url = "https://github.com/alif-type/amiri-font/raw/master/ttf/Amiri-Regular.ttf"
-        r = requests.get(url)
-        with open(FONT_PATH, "wb") as f:
-            f.write(r.content)
-    if "Amiri" not in pdfmetrics.getRegisteredFontNames():
-        pdfmetrics.registerFont(TTFont("Amiri", FONT_PATH))
+    if "Amiri" in pdfmetrics.getRegisteredFontNames():
+        return
+    url = "https://github.com/alif-type/amiri-font/raw/master/ttf/Amiri-Regular.ttf"
+    r = requests.get(url)
+    font_bytes = io.BytesIO(r.content)
+    pdfmetrics.registerFont(TTFont("Amiri", font_bytes))
 
 # ---------------------------
-# EEG Functions (with filtering)
+# EEG Helper (with filtering)
 # ---------------------------
-def preprocess_eeg(raw):
-    raw.filter(0.5, 45, fir_design="firwin", verbose=False)
-    raw.notch_filter([50, 60], fir_design="firwin", verbose=False)
+def preprocess_eeg(raw: mne.io.BaseRaw):
+    raw.filter(0.5, 45, fir_design="firwin", verbose=False)  # Band-pass
+    raw.notch_filter([50, 60], verbose=False)  # Remove powerline noise
     return raw
 
 def compute_band_powers(raw: mne.io.BaseRaw):
@@ -145,25 +139,25 @@ def plot_bands(powers: dict):
 # ---------------------------
 # PDF Generator
 # ---------------------------
-def build_pdf_bytes(results: dict, lang="en", band_png=None, sig_png=None) -> bytes:
+def build_pdf(results: dict, lang="en", band_png=None) -> bytes:
     ensure_amiri()
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4)
     styles = getSampleStyleSheet()
     if lang == "ar":
-        for style in styles.byName.values():
-            style.fontName = "Amiri"
-    flow = []
+        for s in ["Normal", "Heading2", "Title", "Italic"]:
+            styles[s].fontName = "Amiri"
 
+    flow = []
     flow.append(Paragraph(TEXTS[lang]["title"], styles["Title"]))
     flow.append(Paragraph(TEXTS[lang]["subtitle"], styles["Normal"]))
     flow.append(Spacer(1, 12))
 
+    # EEG Results
     flow.append(Paragraph("EEG Results:", styles["Heading2"]))
-    eeg = results.get("EEG", {})
     rows = [["Band", "Power"]]
-    for k, v in eeg.get("bands", {}).items():
-        rows.append([k, f"{v:.6g}"])
+    for k, v in results["bands"].items():
+        rows.append([k, f"{v:.4f}"])
     table = Table(rows, colWidths=[200, 200])
     table.setStyle(TableStyle([
         ("BACKGROUND", (0,0), (-1,0), colors.lightgrey),
@@ -173,19 +167,15 @@ def build_pdf_bytes(results: dict, lang="en", band_png=None, sig_png=None) -> by
     flow.append(table)
     flow.append(Spacer(1, 12))
 
-    flow.append(Paragraph(f"PHQ-9 Score: {results['Depression']['score']} / 27", styles["Normal"]))
-    flow.append(Paragraph(f"AD8 Score: {results['Alzheimer']['score']} / 8", styles["Normal"]))
+    flow.append(Paragraph(f"PHQ-9 Score: {results['phq_score']} / 27", styles["Normal"]))
+    flow.append(Paragraph(f"AD8 Score: {results['ad8_score']} / 8", styles["Normal"]))
     flow.append(Spacer(1, 12))
 
     if band_png:
-        flow.append(RLImage(io.BytesIO(band_png), width=400, height=180))
-        flow.append(Spacer(1, 12))
-    if sig_png:
-        flow.append(RLImage(io.BytesIO(sig_png), width=400, height=160))
+        flow.append(RLImage(io.BytesIO(band_png), width=400, height=200))
         flow.append(Spacer(1, 12))
 
     flow.append(Paragraph(TEXTS[lang]["note"], styles["Italic"]))
-
     doc.build(flow)
     buf.seek(0)
     return buf.getvalue()
@@ -193,24 +183,26 @@ def build_pdf_bytes(results: dict, lang="en", band_png=None, sig_png=None) -> by
 # ---------------------------
 # Streamlit App
 # ---------------------------
-st.sidebar.title("🌐 Interface language / لغة الواجهة")
+st.sidebar.title("🌐 Language / اللغة")
 lang = st.sidebar.radio("Choose / اختر", ["en", "ar"])
-t = TEXTS[lang]
 
+t = TEXTS[lang]
 st.title(t["title"])
 st.write(t["subtitle"])
 
 # 1) EEG Upload
 st.header(t["upload"])
 uploaded = st.file_uploader("EDF", type=["edf"])
-bands, raw = {}, None
+bands = {}
+band_png = None
 if uploaded:
     with tempfile.NamedTemporaryFile(delete=False, suffix=".edf") as tmp:
         tmp.write(uploaded.read())
         raw = mne.io.read_raw_edf(tmp.name, preload=True, verbose=False)
         raw = preprocess_eeg(raw)
         bands = compute_band_powers(raw)
-        st.image(plot_bands(bands))
+        band_png = plot_bands(bands)
+        st.image(band_png)
 
 # 2) PHQ-9
 st.header(t["phq9"])
@@ -231,19 +223,9 @@ ad8_score = sum(ad8_answers)
 # 4) Reports
 st.header(t["report"])
 if st.button("Generate"):
-    results = {
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "EEG": {"bands": bands},
-        "Depression": {"score": phq_score, "answers": phq_answers},
-        "Alzheimer": {"score": ad8_score, "answers": ad8_answers},
-    }
+    results = {"bands": bands, "phq_score": phq_score, "ad8_score": ad8_score}
     json_bytes = io.BytesIO(json.dumps(results, indent=2, ensure_ascii=False).encode())
     st.download_button(t["download_json"], json_bytes, file_name="report.json")
 
-    csv_data = pd.DataFrame.from_dict(bands, orient="index", columns=["Power"])
-    csv_bytes = io.BytesIO()
-    csv_data.to_csv(csv_bytes)
-    st.download_button(t["download_csv"], csv_bytes.getvalue(), file_name="features.csv")
-
-    pdf_bytes = build_pdf_bytes(results, lang=lang)
+    pdf_bytes = build_pdf(results, lang=lang, band_png=band_png)
     st.download_button(t["download_pdf"], pdf_bytes, file_name="report.pdf")
