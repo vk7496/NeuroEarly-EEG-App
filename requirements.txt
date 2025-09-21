@@ -1,9 +1,8 @@
-streamlit>=1.18
-mne>=1.2
+streamlit
+mne
 numpy
 pandas
 matplotlib
-scipy
 reportlab
-arabic-reshaper
-python-bidi
+requests
+scipy
