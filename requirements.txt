@@ -6,3 +6,5 @@ matplotlib
 reportlab
 requests
 scipy
+arabic-reshaper
+python-bidi
