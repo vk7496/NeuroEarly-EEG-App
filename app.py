@@ -5,7 +5,6 @@ import tempfile
 from datetime import datetime
 
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
 import mne
@@ -18,12 +17,19 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib import colors
 
 # ---------------------------
-# Fonts (for Arabic PDF)
+# Arabic font & reshaper
 # ---------------------------
+import arabic_reshaper
+from bidi.algorithm import get_display
+
 AMIRI_PATH = "Amiri-Regular.ttf"
 if os.path.exists(AMIRI_PATH):
     if "Amiri" not in pdfmetrics.getRegisteredFontNames():
         pdfmetrics.registerFont(TTFont("Amiri", AMIRI_PATH))
+
+def reshape_arabic(text: str) -> str:
+    reshaped = arabic_reshaper.reshape(text)
+    return get_display(reshaped)
 
 # ---------------------------
 # Text dictionary
@@ -154,15 +160,18 @@ def build_pdf_bytes(results: dict, lang="en", band_png=None):
     flow = []
     t = TEXTS[lang]
 
-    flow.append(Paragraph(t["title"], styles["Title"]))
-    flow.append(Paragraph(t["subtitle"], styles["Normal"]))
+    def L(txt):
+        return reshape_arabic(txt) if lang == "ar" else txt
+
+    flow.append(Paragraph(L(t["title"]), styles["Title"]))
+    flow.append(Paragraph(L(t["subtitle"]), styles["Normal"]))
     flow.append(Spacer(1, 12))
 
     eeg = results["EEG"]
-    flow.append(Paragraph("EEG Band Powers:", styles["Heading2"]))
-    rows = [["Band", "Power"]]
+    flow.append(Paragraph(L("EEG Band Powers:" if lang == "en" else "قوى موجات الدماغ"), styles["Heading2"]))
+    rows = [["Band", "Power"]] if lang == "en" else [[L("الموجة"), L("القوة")]]
     for k, v in eeg["bands"].items():
-        rows.append([k, f"{v:.4f}"])
+        rows.append([L(k), f"{v:.4f}"])
     table = Table(rows, colWidths=[200, 200])
     table.setStyle(TableStyle([
         ("BACKGROUND", (0,0), (-1,0), colors.lightgrey),
@@ -171,23 +180,22 @@ def build_pdf_bytes(results: dict, lang="en", band_png=None):
     flow.append(table)
     flow.append(Spacer(1, 12))
 
-    flow.append(Paragraph(f"PHQ-9 Score: {results['Depression']['score']} → {results['Depression']['risk']}", styles["Normal"]))
-    flow.append(Paragraph(f"AD8 Score: {results['Alzheimer']['score']} → {results['Alzheimer']['risk']}", styles["Normal"]))
+    flow.append(Paragraph(L(f"PHQ-9 Score: {results['Depression']['score']} → {results['Depression']['risk']}"), styles["Normal"]))
+    flow.append(Paragraph(L(f"AD8 Score: {results['Alzheimer']['score']} → {results['Alzheimer']['risk']}"), styles["Normal"]))
     flow.append(Spacer(1, 12))
 
     if band_png:
         flow.append(RLImage(io.BytesIO(band_png), width=400, height=200))
         flow.append(Spacer(1, 12))
 
-    # Recommendation (simple demo logic)
     rec = "Follow up with a neurologist and psychiatrist for combined evaluation."
     if lang == "ar":
         rec = "ينصح بمتابعة مع طبيب الأعصاب وطبيب نفسي لتقييم مشترك."
-    flow.append(Paragraph("Recommendation:", styles["Heading2"]))
-    flow.append(Paragraph(rec, styles["Normal"]))
+    flow.append(Paragraph(L("Recommendation:" if lang == "en" else "التوصية:"), styles["Heading2"]))
+    flow.append(Paragraph(L(rec), styles["Normal"]))
     flow.append(Spacer(1, 12))
 
-    flow.append(Paragraph(t["note"], styles["Italic"]))
+    flow.append(Paragraph(L(t["note"]), styles["Italic"]))
     doc.build(flow)
     buf.seek(0)
     return buf.getvalue()
