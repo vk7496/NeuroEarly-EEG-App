@@ -5,7 +5,6 @@ import tempfile
 from datetime import datetime
 
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
 import mne
@@ -60,7 +59,7 @@ TEXTS = {
             "Feeling bad about yourself or feeling like a failure",
             "Trouble concentrating (e.g., reading, watching TV)",
             "Moving or speaking slowly, OR being fidgety/restless",
-            "Thoughts of being better off dead or self-harm"
+            "Thoughts of being better off dead\nor self-harm"
         ],
         "phq9_options": ["0 = Not at all", "1 = Several days", "2 = More than half the days", "3 = Nearly every day"],
         "ad8_questions": [
@@ -95,7 +94,7 @@ TEXTS = {
             "الشعور بأنك شخص سيء أو فاشل",
             "صعوبة في التركيز (مثل القراءة أو مشاهدة التلفاز)",
             "الحركة أو الكلام ببطء شديد، أو فرط الحركة",
-            "أفكار بأنك أفضل حالاً ميتاً أو أفكار لإيذاء النفس"
+            "أفكار بأنك أفضل حالاً ميتاً\nأو أفكار لإيذاء النفس"
         ],
         "phq9_options": ["0 = أبداً", "1 = عدة أيام", "2 = أكثر من نصف الأيام", "3 = كل يوم تقريباً"],
         "ad8_questions": [
@@ -134,8 +133,9 @@ def preprocess_raw(raw, l_freq=1.0, h_freq=45.0, notch_freqs=(50, 60)):
     return raw
 
 
-def compute_band_powers_per_channel(raw, bands=BANDS, n_fft=2048):
-    psds, freqs = mne.time_frequency.psd_welch(raw, fmin=0.5, fmax=45, n_fft=n_fft, verbose=False)
+def compute_band_powers_per_channel(raw, bands=BANDS):
+    psd = raw.compute_psd(fmin=0.5, fmax=45, method="welch", verbose=False)
+    psds, freqs = psd.get_data(return_freqs=True)
     band_abs = {}
     band_per_channel = {}
     total_power_per_channel = np.trapz(psds, freqs, axis=1)
@@ -167,20 +167,6 @@ def compute_qeeg_features(raw):
         feats['Theta_Beta_ratio'] = bp['abs_mean']['Theta'] / (bp['abs_mean']['Beta'] + 1e-12)
     if 'Theta' in bp['abs_mean'] and 'Alpha' in bp['abs_mean']:
         feats['Theta_Alpha_ratio'] = bp['abs_mean']['Theta'] / (bp['abs_mean']['Alpha'] + 1e-12)
-    def idx(ch_name):
-        try:
-            return raw.ch_names.index(ch_name)
-        except ValueError:
-            return None
-    pairs = [('F3', 'F4'), ('Fp1', 'Fp2'), ('F7', 'F8')]
-    for left, right in pairs:
-        i = idx(left)
-        j = idx(right)
-        if i is not None and j is not None:
-            alpha_power = bp['per_channel'].get('Alpha')
-            if alpha_power is not None:
-                asym = float(np.log(alpha_power[i] + 1e-12) - np.log(alpha_power[j] + 1e-12))
-                feats[f'alpha_asym_{left}_{right}'] = asym
     return feats, bp
 
 
@@ -218,90 +204,13 @@ if uploaded:
         tmp.write(uploaded.read())
         raw = mne.io.read_raw_edf(tmp.name, preload=True, verbose=False)
         if apply_ica:
-            ica = mne.preprocessing.ICA(n_components=10, random_state=42)
-            ica.fit(raw)
-            raw = ica.apply(raw)
+            try:
+                import sklearn
+                ica = mne.preprocessing.ICA(n_components=10, random_state=42)
+                ica.fit(raw)
+                raw = ica.apply(raw)
+            except ImportError:
+                st.warning("ICA requires scikit-learn. Skipping ICA step.")
         qeeg_features, bp = compute_qeeg_features(raw)
         bands = bp['abs_mean']
         st.image(plot_band_bar(bands))
-
-# 2) PHQ-9
-st.header(t["phq9"])
-phq_answers = []
-for i, q in enumerate(t["phq9_questions"], 1):
-    ans = st.selectbox(q, t["phq9_options"], key=f"phq{i}")
-    phq_answers.append(int(ans.split("=")[0].strip()) if "=" in ans else t["phq9_options"].index(ans))
-phq_score = sum(phq_answers)
-phq_risk = ("Minimal" if phq_score<5 else "Mild" if phq_score<10 else "Moderate" if phq_score<15 else "Moderately severe" if phq_score<20 else "Severe")
-
-# 3) AD8
-st.header(t["ad8"])
-ad8_answers = []
-for i, q in enumerate(t["ad8_questions"], 1):
-    ans = st.selectbox(q, t["ad8_options"], key=f"ad8{i}")
-    ad8_answers.append(1 if ans==t["ad8_options"][1] else 0)
-ad8_score = sum(ad8_answers)
-ad8_risk = "Low" if ad8_score<2 else "Possible concern"
-
-# 4) Report
-st.header(t["report"])
-if st.button("Generate"):
-    results = {
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "EEG": {"bands": bands, "relative": bp['rel_mean'] if bands else {}},
-        "QEEG": qeeg_features,
-        "Depression": {"score": phq_score, "risk": phq_risk},
-        "Alzheimer": {"score": ad8_score, "risk": ad8_risk}
-    }
-    json_bytes = io.BytesIO(json.dumps(results, indent=2, ensure_ascii=False).encode())
-    st.download_button(t["download_json"], json_bytes, file_name="report.json")
-
-    # PDF generation
-    def build_pdf():
-        buf = io.BytesIO()
-        doc = SimpleDocTemplate(buf, pagesize=A4)
-        styles = getSampleStyleSheet()
-        if lang=='ar' and os.path.exists(AMIRI_PATH):
-            for s in ['Normal','Title','Heading2','Italic']:
-                styles[s].fontName='Amiri'
-        flow = []
-        L = lambda txt: reshape_arabic(txt) if lang=='ar' else txt
-        flow.append(Paragraph(L(t['title']), styles['Title']))
-        flow.append(Paragraph(L(t['subtitle']), styles['Normal']))
-        flow.append(Spacer(1,12))
-        flow.append(Paragraph(L(f"Generated: {results['timestamp']}"), styles['Normal']))
-        flow.append(Spacer(1,12))
-
-        flow.append(Paragraph(L("EEG Band Powers" if lang=='en' else "قوى موجات الدماغ"), styles['Heading2']))
-        rows=[["Band","Absolute","Relative"]]
-        for k,v in results['EEG']['bands'].items():
-            rel = results['EEG']['relative'].get(k,0)
-            rows.append([k,f"{v:.4f}",f"{rel:.4f}"])
-        table = Table(rows, colWidths=[150,150,150])
-        table.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.lightgrey),("GRID",(0,0),(-1,-1),0.25,colors.black)]))
-        flow.append(table)
-        flow.append(Spacer(1,12))
-
-        flow.append(Paragraph(L("Depression PHQ-9" if lang=='en' else "فحص الاكتئاب PHQ-9"), styles['Heading2']))
-        flow.append(Paragraph(L(f"Score: {phq_score} → {phq_risk}"), styles['Normal']))
-        flow.append(Spacer(1,12))
-
-        flow.append(Paragraph(L("Cognitive AD8" if lang=='en' else "الفحص المعرفي AD8"), styles['Heading2']))
-        flow.append(Paragraph(L(f"Score: {ad8_score} → {ad8_risk}"), styles['Normal']))
-        flow.append(Spacer(1,12))
-
-        flow.append(Paragraph(L("Recommendation:" if lang=='en' else "التوصية:"), styles['Heading2']))
-        rec = "Follow up with neurologist and psychiatrist." if lang=='en' else "ينصح بمتابعة مع طبيب الأعصاب وطبيب نفسي."
-        flow.append(Paragraph(L(rec), styles['Normal']))
-        flow.append(Spacer(1,12))
-
-        flow.append(Paragraph(L(t['note']), styles['Italic']))
-        if bands:
-            buf_img = plot_band_bar(results['EEG']['bands'])
-            flow.append(RLImage(io.BytesIO(buf_img), width=400, height=200))
-        doc.build(flow)
-        buf.seek(0)
-        return buf.getvalue()
-
-    pdf_bytes = build_pdf()
-    st.download_button(t["download_pdf"], pdf_bytes, file_name="report.pdf")
