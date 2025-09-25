@@ -8,3 +8,4 @@ requests
 scipy
 arabic-reshaper
 python-bidi
+scikit-learn
