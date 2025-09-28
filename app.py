@@ -1,7 +1,7 @@
-# app.py — NeuroEarly Pro (Final)
-# Full-featured Streamlit app: multi-EDF upload, preprocessing, QEEG, Connectivity (coh/PLI/wPLI),
-# contextualized ML risk score (synthetic calibration), PHQ-9/AD8, patient form, labs, meds,
-# PDF/JSON/CSV outputs, Arabic support (Amiri font optional) — research decision-support only.
+# app.py — NeuroEarly Pro (Final v2)
+# Complete Streamlit app: multi-EDF upload, preprocessing, QEEG, Connectivity (coh/PLI/wPLI),
+# contextualized ML risk score (synthetic norms), PHQ-9/AD8, patient form, labs, meds,
+# PDF/JSON/CSV outputs, bilingual EN/AR, archive. Research/decision-support only.
 
 import io
 import os
@@ -39,7 +39,7 @@ try:
 except Exception:
     HAS_SKLEARN = False
 
-# scipy for percentile/CDF
+# SciPy
 try:
     import scipy.stats as stats
     HAS_SCIPY = True
@@ -230,16 +230,11 @@ def compute_qeeg_features(raw: mne.io.BaseRaw) -> Tuple[Dict, Dict]:
 
 # ---------------- Connectivity (final) ----------------
 def compute_connectivity_final(raw: mne.io.BaseRaw, method='wpli', fmin=4.0, fmax=30.0, epoch_len=2.0, picks: Optional[List[str]] = None, mode='fourier', n_jobs=1) -> Dict:
-    """
-    Compute connectivity on raw. Returns {'matrix', 'channels', 'mean_connectivity'} or {'error':...}
-    """
     try:
         from mne.connectivity import spectral_connectivity
     except Exception:
         return {'error': 'mne.connectivity not available'}
-
     try:
-        # picks
         if picks is None:
             picks_idx = mne.pick_types(raw.info, eeg=True, meg=False)
             chs = [raw.ch_names[i] for i in picks_idx]
@@ -259,7 +254,7 @@ def compute_connectivity_final(raw: mne.io.BaseRaw, method='wpli', fmin=4.0, fma
                 start = ei * win_samp
                 stop = start + win_samp
                 epochs_data.append(data[:, start:stop])
-            epochs_array = np.stack(epochs_data)  # (n_epochs, n_ch, n_samps_win)
+            epochs_array = np.stack(epochs_data)
             info = mne.create_info([raw.ch_names[i] for i in picks_idx], sf, ch_types='eeg')
             epochs = mne.EpochsArray(epochs_array, info)
             data_for_conn = epochs
@@ -270,7 +265,6 @@ def compute_connectivity_final(raw: mne.io.BaseRaw, method='wpli', fmin=4.0, fma
             fmin=fmin, fmax=fmax, faverage=True, mt_adaptive=False, n_jobs=n_jobs, verbose=False
         )
         mean_con = np.nanmean(con, axis=1)
-        # reconstruct square matrix
         n_ch = len(picks_idx)
         mat = np.zeros((n_ch, n_ch))
         idx = 0
@@ -315,7 +309,7 @@ def plot_connectivity_heatmap(mat: np.ndarray, chs: List[str]) -> bytes:
     return buf.getvalue()
 
 
-# ---------------- Simple ML model & Normative context ----------------
+# ---------------- ML + Normative ----------------
 def build_synthetic_dataset(n=500):
     rng = np.random.RandomState(42)
     ta = rng.normal(1.0, 0.4, n)
@@ -343,9 +337,8 @@ def train_initial_model():
 MODEL, SCALER = train_initial_model()
 
 
-# Normative stat: synthetic global baseline (optionally replace with real norms)
+# Synthetic normative stats
 def build_synthetic_norms():
-    # returns dict {'global': {feature: {'mu':..., 'sigma':...}}}
     X, _ = build_synthetic_dataset(2000)
     mu = X.mean(axis=0)
     sigma = X.std(axis=0) + 1e-6
@@ -355,20 +348,17 @@ def build_synthetic_norms():
         stats_dict['global'][fn] = {'mu': float(mu[i]), 'sigma': float(sigma[i])}
     return stats_dict
 
+
 NORMATIVE_STATS = build_synthetic_norms()
 
 
 def compute_contextualized_risk(qeeg_feats: Dict, conn_summary: Dict, age: Optional[int]=None, sex: Optional[str]=None, normative_stats=NORMATIVE_STATS, model=MODEL, scaler=SCALER) -> Dict:
-    # build feature vector
     ta = qeeg_feats.get('Theta_Alpha_ratio', 0.0)
     tb = qeeg_feats.get('Theta_Beta_ratio', 0.0)
     asym_vals = [v for k,v in qeeg_feats.items() if k.startswith('alpha_asym_')]
     asym_abs = max([abs(a) for a in asym_vals]) if asym_vals else 0.0
     conn_val = conn_summary.get('mean_connectivity') if conn_summary and 'mean_connectivity' in conn_summary else None
-
-    # compute z-scores vs synthetic norms (global)
     stats_g = normative_stats.get('global', {})
-    z_list = []
     def safe_z(val, name):
         if name in stats_g:
             mu = stats_g[name]['mu']; sigma = stats_g[name]['sigma']
@@ -380,16 +370,13 @@ def compute_contextualized_risk(qeeg_feats: Dict, conn_summary: Dict, age: Optio
     z_list = [z_ta, z_tb, z_asym, z_conn]
     combined_z = float(np.mean(z_list))
     percentile = float(stats.norm.cdf(combined_z) * 100) if HAS_SCIPY else float(50 + combined_z * 10)
-
-    # ML probability if available
     prob = None
     if model is not None and scaler is not None and conn_val is not None:
         X = np.array([[ta, tb, asym_abs, conn_val]])
         Xs = scaler.transform(X)
         prob = float(model.predict_proba(Xs)[0,1] * 100)
     else:
-        # map percentile to a conservative risk
-        prob = percentile * 0.65  # mapping heuristic — conservative
+        prob = percentile * 0.65
     return {'combined_z': combined_z, 'percentile_vs_norm': percentile, 'risk_percent': prob}
 
 
@@ -404,14 +391,11 @@ def build_pdf(results: Dict, patient_info: Dict, lab_results: Dict, meds: List[s
     flow = []
     t = TEXTS[lang]
     L = lambda txt: reshape_arabic(txt) if lang=='ar' else txt
-
     flow.append(Paragraph(L(t['title']), styles['Title']))
     flow.append(Paragraph(L(t['subtitle']), styles['Normal']))
     flow.append(Spacer(1,8))
-    flow.append(Paragraph(L(f"Generated: {results.get('timestamp','')}",), styles['Normal']))
+    flow.append(Paragraph(L(f"Generated: {results.get('timestamp','')}"), styles['Normal']))
     flow.append(Spacer(1,8))
-
-    # patient
     flow.append(Paragraph(L("Patient information:"), styles['Heading2']))
     if any(patient_info.values()):
         p_rows = []
@@ -424,8 +408,6 @@ def build_pdf(results: Dict, patient_info: Dict, lab_results: Dict, meds: List[s
     else:
         flow.append(Paragraph(L("No patient info provided."), styles['Normal']))
     flow.append(Spacer(1,8))
-
-    # labs & meds
     flow.append(Paragraph(L("Recent labs:"), styles['Heading2']))
     if lab_results:
         lab_rows=[["Test","Value"]]
@@ -444,8 +426,6 @@ def build_pdf(results: Dict, patient_info: Dict, lab_results: Dict, meds: List[s
     else:
         flow.append(Paragraph(L("No medications listed."), styles['Normal']))
     flow.append(Spacer(1,12))
-
-    # EEG files
     flow.append(Paragraph(L("EEG & QEEG results:"), styles['Heading2']))
     for fname, block in results.get('EEG_files', {}).items():
         flow.append(Paragraph(L(f"File: {fname}"), styles['Heading2']))
@@ -456,14 +436,12 @@ def build_pdf(results: Dict, patient_info: Dict, lab_results: Dict, meds: List[s
         tble = Table(rows, colWidths=[120,120,120])
         tble.setStyle(TableStyle([("GRID",(0,0),(-1,-1),0.25,colors.black),("BACKGROUND",(0,0),(-1,0),colors.lightgrey)]))
         flow.append(tble); flow.append(Spacer(1,6))
-        # QEEG
         qrows=[["Feature","Value"]]
         for kk,vv in block.get('QEEG', {}).items():
             qrows.append([kk, fmt(vv) if isinstance(vv,(int,float)) else str(vv)])
         qtab = Table(qrows, colWidths=[240,120])
         qtab.setStyle(TableStyle([("GRID",(0,0),(-1,-1),0.25,colors.black),("BACKGROUND",(0,0),(-1,0),colors.lightgrey)]))
         flow.append(qtab); flow.append(Spacer(1,6))
-        # connectivity & risk
         conn = block.get('connectivity', {})
         if conn:
             flow.append(Paragraph(L("Connectivity summary:"), styles['Normal']))
@@ -477,8 +455,6 @@ def build_pdf(results: Dict, patient_info: Dict, lab_results: Dict, meds: List[s
         if conn_images and fname in conn_images:
             flow.append(RLImage(io.BytesIO(conn_images[fname]), width=400, height=200)); flow.append(Spacer(1,6))
         flow.append(Spacer(1,10))
-
-    # interpretations
     flow.append(Paragraph(L("Automated interpretation (heuristic):"), styles['Heading2']))
     if interpretations:
         for line in interpretations:
@@ -486,8 +462,6 @@ def build_pdf(results: Dict, patient_info: Dict, lab_results: Dict, meds: List[s
     else:
         flow.append(Paragraph(L("No heuristic interpretations."), styles['Normal']))
     flow.append(Spacer(1,12))
-
-    # recommendations
     flow.append(Paragraph(L("Structured recommendations (for clinician):"), styles['Heading2']))
     recs = [
         "Correlate QEEG/connectivity findings with PHQ-9 and AD8 and clinical interview.",
@@ -518,7 +492,10 @@ st.write(t['subtitle'])
 with st.expander("🔎 Optional: Patient information / معلومات المريض"):
     name = st.text_input("Full name / الاسم الكامل")
     patient_id = st.text_input("Patient ID / رقم المريض")
-    gender = st.selectbox("Gender / الجنس", ["", "Male", "Female", "Other"]) if lang=='en' else st.selectbox(reshape_arabic("الجنس"), ["", reshape_arabic("ذكر"), reshape_arabic("أنثى"), reshape_arabic("آخر")])
+    if lang=='en':
+        gender = st.selectbox("Gender", ["", "Male", "Female", "Other"]) 
+    else:
+        gender = st.selectbox(reshape_arabic("الجنس"), ["", reshape_arabic("ذكر"), reshape_arabic("أنثى"), reshape_arabic("آخر")])
     dob = st.date_input("Date of birth / تاريخ الميلاد", value=None)
     phone = st.text_input("Phone / الهاتف")
     email = st.text_input("Email / البريد الإلكتروني")
@@ -665,7 +642,6 @@ with tab_report:
         for fname, block in EEG_results['EEG_files'].items():
             qi = block.get('QEEG', {})
             conn = block.get('connectivity', {})
-            # heuristics
             if qi.get('alpha_asym_F3_F4', None) is not None:
                 a = qi['alpha_asym_F3_F4']
                 if a > 0.2:
@@ -679,10 +655,8 @@ with tab_report:
             ctxt = compute_contextualized_risk(qi, conn_summary, age=patient_info.get('age'), sex=patient_info.get('gender'))
             risk_scores[fname] = ctxt['risk_percent']
             interpretations.append(f"{fname}: Contextualized risk ~ {ctxt['risk_percent']:.1f}% (percentile {ctxt['percentile_vs_norm']:.1f}).")
-        # JSON
         json_bytes = io.BytesIO(json.dumps(EEG_results, indent=2, ensure_ascii=False).encode())
         st.download_button(t['download_json'], json_bytes, file_name='report.json')
-        # CSV
         if EEG_results['EEG_files']:
             rows=[]
             for fname, b in EEG_results['EEG_files'].items():
@@ -692,7 +666,6 @@ with tab_report:
                 rows.append(row)
             df = pd.DataFrame(rows)
             st.download_button(t['download_csv'], df.to_csv(index=False).encode('utf-8'), file_name='qeeg_features.csv', mime='text/csv')
-        # PDF
         try:
             pdfb = build_pdf(EEG_results, patient_info, lab_results, meds_list, lang=lang, band_pngs=band_pngs, conn_images=conn_imgs, interpretations=interpretations, risk_scores=risk_scores)
             st.download_button(t['download_pdf'], pdfb, file_name='report.pdf')
