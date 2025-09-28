@@ -4,8 +4,7 @@ numpy
 pandas
 matplotlib
 reportlab
-requests
-scipy
 arabic-reshaper
 python-bidi
 scikit-learn
+scipy
