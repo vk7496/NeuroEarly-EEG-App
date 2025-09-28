@@ -369,7 +369,11 @@ def plot_connectivity_heatmap(mat: np.ndarray, chs: List[str]) -> bytes:
     return buf.getvalue()
 
 # ---------------- ML model & normative (same as before) ----------------
-from sklearn.preprocessing import StandardScaler if HAS_SKLEARN else None
+if HAS_SKLEARN:
+    from sklearn.preprocessing import StandardScaler
+else:
+    StandardScaler = None
+
 
 # Keep synthetic model training as before (omitted here for brevity in this comment)
 # ... (we'll reuse the previous approach for training synthetic model and building norms)
