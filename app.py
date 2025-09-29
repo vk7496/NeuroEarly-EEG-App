@@ -22,6 +22,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
+import streamlit as st
+st.write("✅ App started — UI is loading...")
 
 # Try to import mne; if not available we'll fallback to synthetic analytics
 try:
