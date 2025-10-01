@@ -1,38 +1,31 @@
-# app_final_v3.2.py — NeuroEarly Pro (Final)
-# Complete Streamlit app (EN + AR) with robust fallbacks and fixes
-# Features:
-# - bilingual UI (English + Arabic with reshaping)
-# - multi-EDF upload, preprocessing (filter, notch, downsample), optional ICA
-# - QEEG bandpowers, Theta/Alpha and Theta/Beta ratios, frontal alpha asymmetry
-# - Connectivity (coherence/PLI/wPLI) with MNE when present, synthetic fallback when not
-# - PHQ-9 and AD8 questionnaires (corrected wording)
-# - Patient form, labs, medications archive
-# - Contextualized risk score (synthetic calibrated model)
-# - PDF/JSON/CSV report generation
-# - Defensive: writes a startup message so Streamlit UI won't be blank
+# app.py — NeuroEarly Pro (Final v3.3)
+# Final polished version (EN + AR)
+# Changes in v3.3:
+# - Fixed JSON serialization (ndarray / numpy types -> python types)
+# - PHQ-9 and AD8 questions/options corrected and verified (EN & AR)
+# - Connectivity fallback: DO NOT show random heatmap; show a clear warning if connectivity couldn't be computed
+# - Preserve previous features: multi-EDF, preprocessing, ICA optional, QEEG, patient form, labs/meds, PDF/CSV/JSON exports
+# - Defensive startup message so UI doesn't stay white on errors
 
 import io
 import os
 import json
 import tempfile
 from datetime import datetime, date
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
-import streamlit as st
-st.write("✅ App started — UI is loading...")
 
-# Try to import mne; if not available we'll fallback to synthetic analytics
+# Try MNE; fall back gracefully
 try:
     import mne
     HAS_MNE = True
 except Exception:
     HAS_MNE = False
 
-# PDF + Arabic utilities
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
@@ -40,6 +33,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib import colors
 
+# Arabic utilities
 try:
     import arabic_reshaper
     from bidi.algorithm import get_display
@@ -47,7 +41,7 @@ try:
 except Exception:
     HAS_ARABIC_TOOLS = False
 
-# sklearn conditional import
+# sklearn / ML optional
 try:
     import sklearn
     HAS_SKLEARN = True
@@ -65,7 +59,7 @@ try:
 except Exception:
     HAS_SCIPY = False
 
-# Config
+# ---------------- Config ----------------
 AMIRI_PATH = "Amiri-Regular.ttf"
 BANDS = {"Delta": (0.5, 4), "Theta": (4, 8), "Alpha": (8, 12), "Beta": (12, 30), "Gamma": (30, 45)}
 DEFAULT_NOTCH = [50, 100]
@@ -78,22 +72,52 @@ if os.path.exists(AMIRI_PATH):
     except Exception:
         pass
 
-# Utilities
+# ---------------- Helpers ----------------
 def reshape_arabic(text: str) -> str:
     if HAS_ARABIC_TOOLS:
         return get_display(arabic_reshaper.reshape(text))
     return text
 
+
 def L(text: str, lang: str) -> str:
     return reshape_arabic(text) if lang == 'ar' else text
 
-def fmt(x):
+
+def fmt(x: Any) -> str:
     try:
         return f"{float(x):.4f}"
     except Exception:
         return str(x)
 
-# Texts
+
+# JSON-serializable helper
+def make_serializable(obj: Any):
+    # numpy arrays
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    # numpy scalar types
+    if isinstance(obj, (np.floating, np.float32, np.float64)):
+        return float(obj)
+    if isinstance(obj, (np.integer, np.int32, np.int64)):
+        return int(obj)
+    # pandas types
+    try:
+        import pandas as _pd
+        if isinstance(obj, (_pd.Series, _pd.DataFrame)):
+            return obj.to_dict(orient='records')
+    except Exception:
+        pass
+    # mne objects — return simple repr
+    try:
+        if HAS_MNE and isinstance(obj, mne.io.BaseRaw):
+            return {'info': getattr(obj, 'info', {})}
+    except Exception:
+        pass
+    # fallback to string
+    return str(obj)
+
+
+# ---------------- Texts (PHQ-9 & AD8 carefully phrased) ----------------
 TEXTS = {
     'en': {
         'title': '🧠 NeuroEarly Pro — Clinical Assistant',
@@ -114,21 +138,21 @@ TEXTS = {
             'Trouble falling or staying asleep, or sleeping too much',
             'Feeling tired or having little energy',
             'Poor appetite or overeating (changes in appetite)',
-            'Feeling bad about yourself — or that you are a failure',
-            'Trouble concentrating (e.g., reading, watching TV)',
-            'Moving or speaking so slowly that other people notice, OR being fidgety/restless',
-            'Thoughts that you would be better off dead or of hurting yourself'
+            'Feeling bad about yourself — or that you are a failure or have let yourself or your family down',
+            'Trouble concentrating on things, such as reading the newspaper or watching television',
+            'Moving or speaking so slowly that other people could have noticed. Or the opposite — being so fidgety or restless that you have been moving around a lot more than usual',
+            'Thoughts that you would be better off dead or of hurting yourself in some way'
         ],
         'phq9_options': ['0 = Not at all', '1 = Several days', '2 = More than half the days', '3 = Nearly every day'],
         'ad8_questions': [
-            'Problems with judgment (e.g., poor financial decisions)',
-            'Reduced interest in hobbies/activities',
-            'Repeats questions or stories',
-            'Trouble using a tool or gadget',
-            'Forgets the correct month or year',
-            'Difficulty managing finances (e.g., paying bills)',
-            'Trouble remembering appointments',
-            'Everyday thinking is getting worse'
+            'Problems with judgment (for example, bad financial decisions)',
+            'Less interest in hobbies/activities',
+            'Repeats questions, stories, or statements',
+            'Trouble learning to use a tool, appliance, or gadget',
+            'Forgets the month or year',
+            'Difficulty handling complicated financial affairs (for example, balancing a checkbook)',
+            'Often forgets appointments',
+            'Overall thinking and memory are worse than before'
         ],
         'ad8_options': ['No', 'Yes']
     },
@@ -151,86 +175,28 @@ TEXTS = {
             'مشاكل في النوم أو النوم المفرط',
             'الشعور بالتعب أو قلة الطاقة',
             'تغيرات في الشهية (قِلَّة أو إفراط في الأكل)',
-            'الشعور بسوء تجاه النفس أو أنك فاشل',
-            'صعوبة في التركيز (مثل القراءة أو مشاهدة التلفاز)',
-            'الحركة أو الكلام ببطء شديد بحيث يلاحظه الآخرون، أو العكس — فرِط الحركة',
-            'أفكار بأنك أفضل حالاً لو كنت ميتاً أو إيذاء النفس'
+            'الشعور بسوء تجاه النفس أو أنك فاشل أو قد خيبت أمل نفسك أو أسرتك',
+            'صعوبة في التركيز في أمور مثل القراءة أو مشاهدة التلفاز',
+            'الحركة أو الكلام ببطء شديد بحيث يلاحظه الآخرون، أو العكس — فرط الحركة',
+            'أفكار بأنك أفضل حالًا لو كنت ميتًا أو أفكار لإيذاء النفس'
         ],
-        'phq9_options': ['0 = أبداً', '1 = عدة أيام', '2 = أكثر من نصف الأيام', '3 = كل يوم تقريباً'],
+        'phq9_options': ['0 = أبداً', '1 = عدة أيام', '2 = أكثر من نصف الأيام', '3 = كل يوم تقريبًا'],
         'ad8_questions': [
-            'مشاكل في الحكم أو اتخاذ القرارات',
+            'مشاكل في الحكم (مثل قرارات مالية سيئة)',
             'انخفاض الاهتمام بالهوايات أو الأنشطة',
-            'تكرار الأسئلة أو القصص',
-            'صعوبة في استخدام أداة أو جهاز',
-            'نسيان الشهر أو السنة الصحيحة',
-            'صعوبة في إدارة الشؤون المالية',
-            'صعوبة في تذكر المواعيد',
-            'تدهور التفكير اليومي'
+            'تكرار الأسئلة أو القصص أو العبارات',
+            'صعوبة في تعلم استخدام أداة أو جهاز',
+            'نسيان الشهر أو السنة',
+            'صعوبة في التعامل مع الشؤون المالية المعقدة',
+            'غالبًا ما ينسى المواعيد',
+            'التفكير والذاكرة أسوأ من السابق'
         ],
         'ad8_options': ['لا', 'نعم']
     }
 }
 
-# Startup message to avoid white screen
-st.set_page_config(page_title='NeuroEarly Pro — Clinical', layout='wide')
-st.write('✅ App started — loading UI...')
+# ---------------- EEG processing ----------------
 
-# Sidebar language
-st.sidebar.title('🌐 Language / اللغة')
-lang = st.sidebar.radio('Choose / اختر', ['en', 'ar'])
-t = TEXTS[lang]
-
-st.title(L(t['title'], lang))
-st.write(L(t['subtitle'], lang))
-
-# Patient form with extended DOB range
-with st.expander(L('🔎 Optional: Patient information / معلومات المريض', lang)):
-    name = st.text_input(L('Full name / الاسم الكامل', lang))
-    patient_id = st.text_input(L('Patient ID / رقم المريض', lang))
-    if lang == 'en':
-        gender = st.selectbox('Gender', ['', 'Male', 'Female', 'Other'])
-    else:
-        gender = st.selectbox(L('الجنس', lang), ['', L('ذكر', lang), L('أنثى', lang), L('آخر', lang)])
-    min_dob = date(1920, 1, 1)
-    max_dob = date.today()
-    dob = st.date_input(L('Date of birth / تاريخ الميلاد', lang), value=None, min_value=min_dob, max_value=max_dob)
-    phone = st.text_input(L('Phone / الهاتف', lang))
-    email = st.text_input(L('Email / البريد الإلكتروني', lang))
-    history = st.text_area(L('Relevant history (diabetes, HTN, family history...) / التاريخ الطبي', lang), height=80)
-
-patient_info = {
-    'name': name, 'id': patient_id, 'gender': gender,
-    'dob': dob.strftime('%Y-%m-%d') if dob else '', 'age': int((datetime.now().date()-dob).days/365) if dob else '',
-    'phone': phone, 'email': email, 'history': history
-}
-
-# Labs and meds
-with st.expander(L('🧪 Optional: Recent lab tests / التحاليل', lang)):
-    lab_glucose = st.text_input(L('Glucose', lang))
-    lab_b12 = st.text_input(L('Vitamin B12', lang))
-    lab_vitd = st.text_input(L('Vitamin D', lang))
-    lab_tsh = st.text_input(L('TSH', lang))
-    lab_crp = st.text_input(L('CRP', lang))
-lab_results = {}
-if lab_glucose: lab_results['Glucose'] = lab_glucose
-if lab_b12: lab_results['Vitamin B12'] = lab_b12
-if lab_vitd: lab_results['Vitamin D'] = lab_vitd
-if lab_tsh: lab_results['TSH'] = lab_tsh
-if lab_crp: lab_results['CRP'] = lab_crp
-
-with st.expander(L('💊 Current medications (one per line) / الأدوية الحالية', lang)):
-    meds_text = st.text_area(L('List medications / اكتب الأدوية', lang), height=120)
-meds_list = [m.strip() for m in meds_text.splitlines() if m.strip()]
-
-# Tabs
-tab_upload, tab_phq, tab_ad8, tab_report = st.tabs([L(t['upload'], lang), L(t['phq9'], lang), L(t['ad8'], lang), L(t['report'], lang)])
-
-# Shared containers
-EEG_results = {'EEG_files': {}}
-band_pngs = {}
-conn_imgs = {}
-
-# Preprocessing and QEEG (robust)
 def preprocess_raw(raw, l_freq=1.0, h_freq=45.0, notch_freqs: Optional[List[int]] = DEFAULT_NOTCH, downsample: Optional[int] = None):
     try:
         raw = raw.copy()
@@ -258,7 +224,6 @@ def preprocess_raw(raw, l_freq=1.0, h_freq=45.0, notch_freqs: Optional[List[int]
 
 
 def compute_band_powers_per_channel(raw):
-    # Use MNE PSD if available, else synthesize plausible PSD
     psds = None; freqs = None
     if HAS_MNE and hasattr(raw, 'get_data'):
         try:
@@ -270,7 +235,6 @@ def compute_band_powers_per_channel(raw):
             except Exception:
                 psds = None
     if psds is None:
-        # synthesize
         try:
             n_ch = len(raw.ch_names)
         except Exception:
@@ -323,36 +287,16 @@ def compute_qeeg_features_safe(raw):
         feats = {'Theta_Alpha_ratio': float(np.random.uniform(0.6, 1.6)), 'Theta_Beta_ratio': float(np.random.uniform(0.6, 1.6))}
         return feats, bp
 
-# Connectivity safe
+# Connectivity: do NOT show random heatmap to user; show warning if connectivity failed
 
 def compute_connectivity_final_safe(raw, method='wpli', fmin=4.0, fmax=30.0, epoch_len=2.0, picks: Optional[List[str]] = None, mode='fourier', n_jobs=1):
-    # If mne not present, return synthetic symmetric matrix
     if not HAS_MNE:
-        try:
-            chs = raw.ch_names if hasattr(raw, 'ch_names') else [f'Ch{i}' for i in range(8)]
-        except Exception:
-            chs = [f'Ch{i}' for i in range(8)]
-        n = len(chs)
-        mat = np.random.rand(n,n)
-        mat = (mat + mat.T)/2.0
-        np.fill_diagonal(mat, 1.0)
-        return {'matrix': mat, 'channels': chs, 'mean_connectivity': float(np.nanmean(mat)), 'simulated': True}
+        return {'error': 'mne not available'}
     try:
-        from mne.connectivity import spectral_connectivity
-        # delegate to MNE implementation
         return compute_connectivity_final(raw, method=method, fmin=fmin, fmax=fmax, epoch_len=epoch_len, picks=picks, mode=mode, n_jobs=n_jobs)
-    except Exception:
-        try:
-            chs = raw.ch_names if hasattr(raw, 'ch_names') else [f'Ch{i}' for i in range(8)]
-        except Exception:
-            chs = [f'Ch{i}' for i in range(8)]
-        n = len(chs)
-        mat = np.random.rand(n,n)
-        mat = (mat + mat.T)/2.0
-        np.fill_diagonal(mat, 1.0)
-        return {'matrix': mat, 'channels': chs, 'mean_connectivity': float(np.nanmean(mat)), 'simulated': True}
+    except Exception as e:
+        return {'error': f'connectivity failed: {e}'}
 
-# If MNE available define compute_connectivity_final using spectral_connectivity
 if HAS_MNE:
     def compute_connectivity_final(raw, method='wpli', fmin=4.0, fmax=30.0, epoch_len=2.0, picks: Optional[List[str]] = None, mode='fourier', n_jobs=1):
         from mne.connectivity import spectral_connectivity
@@ -369,20 +313,18 @@ if HAS_MNE:
         data = raw.get_data(picks=picks_idx)
         n_samps = data.shape[1]
         n_epochs = n_samps // win_samp
-        if n_epochs >= 2:
-            epochs_data = []
-            for ei in range(n_epochs):
-                start = ei * win_samp
-                stop = start + win_samp
-                epochs_data.append(data[:, start:stop])
-            epochs_array = np.stack(epochs_data)
-            info = mne.create_info([raw.ch_names[i] for i in picks_idx], sf, ch_types='eeg')
-            epochs = mne.EpochsArray(epochs_array, info)
-            data_for_conn = epochs
-        else:
-            data_for_conn = raw
+        if n_epochs < 2:
+            return {'error': 'not enough epochs (recording too short)'}
+        epochs_data = []
+        for ei in range(n_epochs):
+            start = ei * win_samp
+            stop = start + win_samp
+            epochs_data.append(data[:, start:stop])
+        epochs_array = np.stack(epochs_data)
+        info = mne.create_info([raw.ch_names[i] for i in picks_idx], sf, ch_types='eeg')
+        epochs = mne.EpochsArray(epochs_array, info)
         con, freqs, times, n_epochs_out, n_tapers = spectral_connectivity(
-            data_for_conn, method=method, mode=mode, sfreq=raw.info['sfreq'], fmin=fmin, fmax=fmax, faverage=True, mt_adaptive=False, n_jobs=n_jobs, verbose=False)
+            epochs, method=method, mode=mode, sfreq=raw.info['sfreq'], fmin=fmin, fmax=fmax, faverage=True, mt_adaptive=False, n_jobs=n_jobs, verbose=False)
         mean_con = np.nanmean(con, axis=1)
         n_ch = len(picks_idx)
         mat = np.zeros((n_ch, n_ch))
@@ -395,7 +337,8 @@ if HAS_MNE:
                 idx += 1
         return {'matrix': mat, 'channels': chs, 'mean_connectivity': float(np.nanmean(mean_con))}
 
-# Simple synthetic model & norms (used if no local training data)
+# Simple synthetic model + norms
+
 def build_synthetic_dataset(n=500):
     rng = np.random.RandomState(42)
     ta = rng.normal(1.0, 0.4, n)
@@ -407,6 +350,7 @@ def build_synthetic_dataset(n=500):
     y = (prob > 0.5).astype(int)
     X = np.vstack([ta, tb, np.abs(asym), conn]).T
     return X, y
+
 
 def train_initial_model():
     if not HAS_SKLEARN:
@@ -420,7 +364,7 @@ def train_initial_model():
 
 MODEL, SCALER = train_initial_model()
 
-# Synthetic norms
+
 def build_synthetic_norms():
     X, _ = build_synthetic_dataset(2000)
     mu = X.mean(axis=0)
@@ -433,7 +377,7 @@ def build_synthetic_norms():
 
 NORMATIVE_STATS = build_synthetic_norms()
 
-# Contextualized risk
+
 def compute_contextualized_risk(qeeg_feats: Dict, conn_summary: Dict, age: Optional[int]=None, sex: Optional[str]=None) -> Dict:
     ta = qeeg_feats.get('Theta_Alpha_ratio', 0.0)
     tb = qeeg_feats.get('Theta_Beta_ratio', 0.0)
@@ -474,6 +418,7 @@ def plot_band_bar(band_dict: Dict) -> bytes:
     plt.close(fig)
     return buf.getvalue()
 
+
 def plot_connectivity_heatmap(mat: np.ndarray, chs: List[str]) -> bytes:
     fig, ax = plt.subplots(figsize=(6,5))
     vmax = np.nanpercentile(mat, 95) if np.any(mat) else 1.0
@@ -489,7 +434,7 @@ def plot_connectivity_heatmap(mat: np.ndarray, chs: List[str]) -> bytes:
     plt.close(fig)
     return buf.getvalue()
 
-# PDF builder (uses L to localize text)
+# PDF builder
 def build_pdf(results: Dict, patient_info: Dict, lab_results: Dict, meds: List[str], lang='en', band_pngs: Dict[str, bytes]=None, conn_images: Dict[str, bytes]=None, interpretations: List[str]=None, risk_scores: Dict[str,float]=None) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4)
@@ -531,7 +476,6 @@ def build_pdf(results: Dict, patient_info: Dict, lab_results: Dict, meds: List[s
         tble.setStyle(TableStyle([('GRID',(0,0),(-1,-1),0.25,colors.black),('BACKGROUND',(0,0),(-1,0),colors.lightgrey)]))
         flow.append(tble)
         flow.append(Spacer(1,6))
-        # qEEG features
         qrows = [[L('Feature', lang), L('Value', lang)]]
         for kk,vv in block.get('QEEG', {}).items():
             qrows.append([L(str(kk), lang), L(str(fmt(vv)), lang)])
@@ -539,18 +483,20 @@ def build_pdf(results: Dict, patient_info: Dict, lab_results: Dict, meds: List[s
         qtab.setStyle(TableStyle([('GRID',(0,0),(-1,-1),0.25,colors.black),('BACKGROUND',(0,0),(-1,0),colors.lightgrey)]))
         flow.append(qtab)
         flow.append(Spacer(1,6))
-        # connectivity summary
         conn = block.get('connectivity', {})
         if conn:
             flow.append(Paragraph(L('Connectivity summary:', lang), styles['Normal']))
-            for ck,cv in conn.items():
-                if ck=='matrix': continue
-                flow.append(Paragraph(L(f"{ck}: {fmt(cv)}", lang), styles['Normal']))
+            if conn.get('error'):
+                flow.append(Paragraph(L(f"Connectivity: {conn.get('error')}", lang), styles['Normal']))
+            else:
+                for ck,cv in conn.items():
+                    if ck=='matrix': continue
+                    flow.append(Paragraph(L(f"{ck}: {fmt(cv)}", lang), styles['Normal']))
         if risk_scores and fname in risk_scores:
             flow.append(Spacer(1,6)); flow.append(Paragraph(L(f"Contextualized risk (prelim.): {risk_scores[fname]:.1f}%", lang), styles['Normal']))
         if band_pngs and fname in band_pngs:
             flow.append(RLImage(io.BytesIO(band_pngs[fname]), width=400, height=140)); flow.append(Spacer(1,6))
-        if conn_images and fname in conn_images:
+        if conn_images and fname in conn_images and not EEG_results['EEG_files'][fname].get('connectivity',{}).get('error'):
             flow.append(RLImage(io.BytesIO(conn_images[fname]), width=400, height=200)); flow.append(Spacer(1,6))
         flow.append(Spacer(1,10))
     flow.append(Paragraph(L('Automated interpretation (heuristic):', lang), styles['Heading2']))
@@ -565,7 +511,8 @@ def build_pdf(results: Dict, patient_info: Dict, lab_results: Dict, meds: List[s
         'Correlate QEEG/connectivity findings with PHQ-9 and AD8 and clinical interview.',
         'If PHQ-9 suggests moderate/severe depression or left frontal alpha asymmetry found, consider psychiatric referral and treatment planning (psychotherapy ± pharmacotherapy).',
         'If AD8 elevated or theta increase present, consider neurocognitive assessment and neuroimaging (MRI) as needed.',
-        'Review current medications for EEG-affecting agents.',
+        'Review current medications for EEG-affecting agents; adjust medications if clinically indicated.',
+        'Consider short-interval follow-up EEG or ambulatory EEG if findings are unclear or inconsistent with clinical picture.',
         'If suicidal ideation present (PHQ-9 item), arrange urgent psychiatric evaluation.'
     ]
     for r in recs:
@@ -576,7 +523,61 @@ def build_pdf(results: Dict, patient_info: Dict, lab_results: Dict, meds: List[s
     buf.seek(0)
     return buf.getvalue()
 
-# UI: Upload tab
+# ---------------- Streamlit UI ----------------
+st.set_page_config(page_title='NeuroEarly Pro — Clinical', layout='wide')
+# startup message to avoid white screen
+st.write('✅ App started — loading UI...')
+
+st.sidebar.title('🌐 Language / اللغة')
+lang = st.sidebar.radio('Choose / اختر', ['en', 'ar'])
+t = TEXTS[lang]
+
+st.title(L(t['title'], lang))
+st.write(L(t['subtitle'], lang))
+
+# Patient form
+with st.expander(L('🔎 Optional: Patient information / معلومات المريض', lang)):
+    name = st.text_input(L('Full name / الاسم الكامل', lang))
+    patient_id = st.text_input(L('Patient ID / رقم المريض', lang))
+    if lang == 'en':
+        gender = st.selectbox('Gender', ['', 'Male', 'Female', 'Other'])
+    else:
+        gender = st.selectbox(L('الجنس', lang), ['', L('ذكر', lang), L('أنثى', lang), L('آخر', lang)])
+    min_dob = date(1920, 1, 1)
+    max_dob = date.today()
+    dob = st.date_input(L('Date of birth / تاريخ الميلاد', lang), value=None, min_value=min_dob, max_value=max_dob)
+    phone = st.text_input(L('Phone / الهاتف', lang))
+    email = st.text_input(L('Email / البريد الإلكتروني', lang))
+    history = st.text_area(L('Relevant history (diabetes, HTN, family history...) / التاريخ الطبي', lang), height=80)
+
+patient_info = {'name': name, 'id': patient_id, 'gender': gender, 'dob': dob.strftime('%Y-%m-%d') if dob else '', 'age': int((datetime.now().date()-dob).days/365) if dob else '', 'phone': phone, 'email': email, 'history': history}
+
+# Labs & meds
+with st.expander(L('🧪 Optional: Recent lab tests / التحاليل', lang)):
+    lab_glucose = st.text_input(L('Glucose', lang))
+    lab_b12 = st.text_input(L('Vitamin B12', lang))
+    lab_vitd = st.text_input(L('Vitamin D', lang))
+    lab_tsh = st.text_input(L('TSH', lang))
+    lab_crp = st.text_input(L('CRP', lang))
+lab_results = {}
+if lab_glucose: lab_results['Glucose'] = lab_glucose
+if lab_b12: lab_results['Vitamin B12'] = lab_b12
+if lab_vitd: lab_results['Vitamin D'] = lab_vitd
+if lab_tsh: lab_results['TSH'] = lab_tsh
+if lab_crp: lab_results['CRP'] = lab_crp
+
+with st.expander(L('💊 Current medications (one per line) / الأدوية الحالية', lang)):
+    meds_text = st.text_area(L('List medications / اكتب الأدوية', lang), height=120)
+meds_list = [m.strip() for m in meds_text.splitlines() if m.strip()]
+
+# Tabs
+tab_upload, tab_phq, tab_ad8, tab_report = st.tabs([L(t['upload'], lang), L(t['phq9'], lang), L(t['ad8'], lang), L(t['report'], lang)])
+
+EEG_results = {'EEG_files': {}}
+band_pngs = {}
+conn_imgs = {}
+
+# Upload tab
 with tab_upload:
     st.header(L(t['upload'], lang))
     uploaded_files = st.file_uploader(L('EDF files / ملفات EDF', lang), type=['edf'], accept_multiple_files=True)
@@ -597,7 +598,6 @@ with tab_upload:
                 if HAS_MNE:
                     raw = mne.io.read_raw_edf(tmp_name, preload=True, verbose=False)
                 else:
-                    # create dummy with minimal attributes
                     class RawDummy:
                         def __init__(self):
                             self.ch_names = [f'Ch{i+1}' for i in range(8)]
@@ -619,7 +619,9 @@ with tab_upload:
                 if compute_conn:
                     with st.spinner(L('Computing connectivity (may be slow)...', lang)):
                         conn_res = compute_connectivity_final_safe(raw, method=conn_method, fmin=4.0, fmax=30.0, epoch_len=epoch_len, picks=None, mode='fourier', n_jobs=1)
-                        if 'matrix' in conn_res:
+                        if conn_res.get('error'):
+                            st.warning(L(f"Connectivity not available: {conn_res.get('error')}", lang))
+                        else:
                             try:
                                 img = plot_connectivity_heatmap(conn_res['matrix'], conn_res['channels'])
                                 conn_imgs[f.name] = img
@@ -706,19 +708,25 @@ with tab_report:
             ctxt = compute_contextualized_risk(qi, conn_summary, age=patient_info.get('age'), sex=patient_info.get('gender'))
             risk_scores[fname] = ctxt['risk_percent']
             interpretations.append(f"{fname}: Contextualized risk ~ {ctxt['risk_percent']:.1f}% (percentile {ctxt['percentile_vs_norm']:.1f}).")
-        # JSON
-        json_bytes = io.BytesIO(json.dumps(EEG_results, indent=2, ensure_ascii=False).encode())
-        st.download_button(L(TEXTS[lang]['download_json'], lang), json_bytes, file_name='report.json')
+        # JSON (serialize)
+        try:
+            json_bytes = io.BytesIO(json.dumps(EEG_results, indent=2, ensure_ascii=False, default=make_serializable).encode())
+            st.download_button(L(TEXTS[lang]['download_json'], lang), json_bytes, file_name='report.json')
+        except Exception as e:
+            st.warning(L(f'JSON export failed: {e}', lang))
         # CSV
-        if EEG_results['EEG_files']:
-            rows=[]
-            for fname, b in EEG_results['EEG_files'].items():
-                row = {'file': fname}
-                for k,v in b.get('QEEG', {}).items(): row[k]=v
-                row['risk_score'] = risk_scores.get(fname, '')
-                rows.append(row)
-            df = pd.DataFrame(rows)
-            st.download_button(L(TEXTS[lang]['download_csv'], lang), df.to_csv(index=False).encode('utf-8'), file_name='qeeg_features.csv', mime='text/csv')
+        try:
+            if EEG_results['EEG_files']:
+                rows=[]
+                for fname, b in EEG_results['EEG_files'].items():
+                    row = {'file': fname}
+                    for k,v in b.get('QEEG', {}).items(): row[k]=v
+                    row['risk_score'] = risk_scores.get(fname, '')
+                    rows.append(row)
+                df = pd.DataFrame(rows)
+                st.download_button(L(TEXTS[lang]['download_csv'], lang), df.to_csv(index=False).encode('utf-8'), file_name='qeeg_features.csv', mime='text/csv')
+        except Exception as e:
+            st.warning(L(f'CSV export failed: {e}', lang))
         # PDF
         try:
             pdfb = build_pdf(EEG_results, patient_info, lab_results, meds_list, lang=lang, band_pngs=band_pngs, conn_images=conn_imgs, interpretations=interpretations, risk_scores=risk_scores)
@@ -729,10 +737,11 @@ with tab_report:
     st.markdown('---')
     st.info(L(TEXTS[lang]['note'], lang))
 
-# Footer: installation notes
+# Footer
 with st.expander(L('Installation & Notes / ملاحظات التثبيت', lang)):
     st.write('Create a requirements.txt with these packages:')
-    st.code('\n'.join(['streamlit','numpy','pandas','matplotlib','mne','scikit-learn','reportlab','arabic-reshaper','python-bidi','scipy']))
+    st.code('
+'.join(['streamlit','numpy','pandas','matplotlib','mne','scikit-learn','reportlab','arabic-reshaper','python-bidi','scipy']))
     st.write(L('If compute_connectivity is slow: avoid enabling it on very long recordings. ICA requires scikit-learn. ML model is preliminary and trained on synthetic data — calibrate with local labeled data before clinical use.', lang))
 
-# End of app_final_v3.2.py
+# End of Final v3.3
