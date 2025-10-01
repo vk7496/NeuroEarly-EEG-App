@@ -1,9 +1,9 @@
-# app.py — NeuroEarly Pro (Final v4.1)
-# Polished update: fixes for Arabic PDF shaping and PHQ-9/AD8 wording issues.
-# - If Arabic runtime/tools/font missing, PDF will include clear notice and English fallback.
-# - UI shows a warning if Arabic shaping resources are missing.
-# - PHQ-9/AD8 phrasing double-checked and corrected for both EN and AR.
-# - JSON serialization and connectivity behavior preserved from v4.
+# app.py — NeuroEarly Pro (Final v4.2)
+# Complete, polished Streamlit app with fixes:
+# - PHQ-9 & AD8 question wording corrected while preserving option structure
+# - Arabic PDF shaping applied to ALL table cells and paragraphs
+# - Arabic PDF fallback/warnings if Amiri font or shaping libs missing
+# - Preserves previous features: multi-EDF upload, preprocessing, ICA, QEEG, Connectivity, ML risk score, exports
 
 import io
 import os
@@ -47,6 +47,7 @@ try:
 except Exception:
     HAS_SCIPY = False
 
+# PDF libs
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
@@ -54,7 +55,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib import colors
 
-# Config
+# ---------------- Config ----------------
 AMIRI_PATH = "Amiri-Regular.ttf"
 BANDS = {"Delta": (0.5, 4), "Theta": (4, 8), "Alpha": (8, 12), "Beta": (12, 30), "Gamma": (30, 45)}
 DEFAULT_NOTCH = [50, 100]
@@ -67,17 +68,27 @@ if os.path.exists(AMIRI_PATH):
     except Exception:
         pass
 
-# Helpers
-
+# ---------------- Helpers ----------------
 def reshape_arabic(text: str) -> str:
     if HAS_ARABIC_TOOLS:
         return get_display(arabic_reshaper.reshape(text))
     return text
 
 
+def arabic_pdf_ready() -> bool:
+    return HAS_ARABIC_TOOLS and os.path.exists(AMIRI_PATH)
+
+
 def L(text: str, lang: str) -> str:
-    # Localize for UI (reshaped if Arabic tools present)
-    return reshape_arabic(text) if lang == 'ar' and HAS_ARABIC_TOOLS else text
+    # For UI labels: if Arabic and shaping tools are present, reshape; else return original
+    return reshape_arabic(text) if (lang == 'ar' and HAS_ARABIC_TOOLS) else text
+
+
+def cell_text_for_pdf(text: str, lang: str, use_ar_font: bool) -> str:
+    # Ensure table cell text is reshaped when producing Arabic PDF
+    if lang == 'ar' and use_ar_font and HAS_ARABIC_TOOLS:
+        return reshape_arabic(text)
+    return text
 
 
 def fmt(x: Any) -> str:
@@ -86,8 +97,8 @@ def fmt(x: Any) -> str:
     except Exception:
         return str(x)
 
+# JSON serialization helper
 
-# Serialization helper
 def make_serializable(obj: Any):
     if isinstance(obj, np.ndarray):
         return obj.tolist()
@@ -108,7 +119,7 @@ def make_serializable(obj: Any):
         pass
     return str(obj)
 
-# Texts
+# ---------------- Texts (PHQ-9 & AD8 corrected) ----------------
 TEXTS = {
     'en': {
         'title': '🧠 NeuroEarly Pro — Clinical Assistant',
@@ -131,7 +142,7 @@ TEXTS = {
             'Poor appetite or overeating (changes in appetite)',
             'Feeling bad about yourself — or that you are a failure or have let yourself or your family down',
             'Trouble concentrating on things, such as reading the newspaper or watching television',
-            'Moving or speaking so slowly that other people could have noticed. Or the opposite — being so fidgety or restless that you have been moving around a lot more than usual',
+            'Moving or speaking so slowly that others could have noticed OR being so fidgety/restless that you have been moving a lot more than usual',
             'Thoughts that you would be better off dead or of hurting yourself in some way'
         ],
         'phq9_options': ['0 = Not at all', '1 = Several days', '2 = More than half the days', '3 = Nearly every day'],
@@ -150,9 +161,9 @@ TEXTS = {
     'ar': {
         'title': '🧠 نيوروإيرلي برو — مساعد سريري',
         'subtitle': 'EEG و QEEG والتحليل الشبكي وتقييم المخاطر (نموذج تجريبي).',
-        'upload': '١) تحميل ملف(های) EEG (.edf) — امکان بارگذاری چندگانه',
-        'clean': 'إزالة المكونات المستقلة (ICA) (يتطلب scikit-learn)',
-        'compute_connectivity': 'حساب الاتصالات (coh/PLI/wPLI) — اختياري، بطيء',
+        'upload': '١) تحميل ملف(های) EEG (.edf) — إمكانية تحميل متعددة',
+        'clean': 'إزالة مكونات التشويش (ICA) (يتطلب scikit-learn)',
+        'compute_connectivity': 'حساب الاتصالات (coh/PLI/wPLI) — اختياري وقد يكون بطيئًا',
         'phq9': '٢) استبيان الاكتئاب — PHQ-9',
         'ad8': '٣) الفحص المعرفي — AD8',
         'report': '٤) إنشاء التقرير (JSON / PDF / CSV)',
@@ -163,34 +174,30 @@ TEXTS = {
         'phq9_questions': [
             'قلة الاهتمام أو المتعة في الأنشطة',
             'الشعور بالحزن أو الاكتئاب أو اليأس',
-            'مشاكل في النوم أو النوم المفرط',
+            'صعوبة في النوم أو النوم المفرط',
             'الشعور بالتعب أو قلة الطاقة',
-            'تغيرات في الشهية (قِلَّة أو الإفراط في الأكل)',
-            'الشعور بسوء تجاه النفس أو أنك فاشل أو قد خيبت أمل نفسك أو أسرتك',
+            'تغيرات في الشهية (قِلَّة أو إفراط في الأكل)',
+            'الشعور بسوء تجاه النفس أو الإحساس بالفشل أو خيبة الأمل',
             'صعوبة في التركيز في أمور مثل القراءة أو مشاهدة التلفاز',
-            'الحركة أو الكلام ببطء شديد بحيث يلاحظه الآخرون، أو العكس — فرط الحركة',
-            'أفكار بأنك أفضل حالًا لو كنت ميتًا أو أفكار لإيذاء النفس'
+            'الحركة أو الكلام ببطء بحيث يلاحظه الآخرون، أو على النقيض شعور بفرط النشاط والحركية',
+            'أفكار بأنك ستكون أفضل حالًا لو كنت ميتًا أو أفكار لإيذاء النفس'
         ],
         'phq9_options': ['0 = أبداً', '1 = عدة أيام', '2 = أكثر من نصف الأيام', '3 = كل يوم تقريبًا'],
         'ad8_questions': [
-            'مشاكل في الحكم (مثل قرارات مالية سيئة)',
+            'مشاكل في الحكم (مثل اتخاذ قرارات مالية سيئة)',
             'انخفاض الاهتمام بالهوايات أو الأنشطة',
             'تكرار الأسئلة أو القصص أو العبارات',
             'صعوبة في تعلم استخدام أداة أو جهاز',
             'نسيان الشهر أو السنة',
-            'صعوبة في التعامل مع الشؤون المالية المعقدة',
+            'صعوبة في التعامل مع الأمور المالية المعقدة',
             'غالبًا ما ينسى المواعيد',
-            'التفكير والذاكرة أسوأ من السابق'
+            'التفكير والذاكرة أسوأ مما كانت عليه سابقًا'
         ],
         'ad8_options': ['لا', 'نعم']
     }
 }
 
-# Utility: is Arabic PDF rendering ready?
-def arabic_pdf_ready():
-    return HAS_ARABIC_TOOLS and os.path.exists(AMIRI_PATH)
-
-# Preprocessing & QEEG (same as before)
+# ---------------- EEG processing (same robust functions) ----------------
 
 def preprocess_raw(raw, l_freq=1.0, h_freq=45.0, notch_freqs: Optional[List[int]] = DEFAULT_NOTCH, downsample: Optional[int] = None):
     try:
@@ -282,7 +289,7 @@ def compute_qeeg_features_safe(raw):
         feats = {'Theta_Alpha_ratio': float(np.random.uniform(0.6, 1.6)), 'Theta_Beta_ratio': float(np.random.uniform(0.6, 1.6))}
         return feats, bp
 
-# Connectivity safe
+# Connectivity: same safe wrapper and implementation as before (no random matrices shown)
 
 def compute_connectivity_final_safe(raw, method='wpli', fmin=4.0, fmax=30.0, epoch_len=2.0, picks: Optional[List[str]] = None, mode='fourier', n_jobs=1):
     if not HAS_MNE:
@@ -332,7 +339,7 @@ if HAS_MNE:
                 idx += 1
         return {'matrix': mat, 'channels': chs, 'mean_connectivity': float(np.nanmean(mean_con))}
 
-# Synthetic ML model + norms
+# Synthetic ML model + norms (unchanged)
 
 def build_synthetic_dataset(n=500):
     rng = np.random.RandomState(42)
@@ -400,7 +407,7 @@ def compute_contextualized_risk(qeeg_feats: Dict, conn_summary: Dict, age: Optio
         prob = percentile * 0.65
     return {'combined_z': combined_z, 'percentile_vs_norm': percentile, 'risk_percent': prob}
 
-# Plot helpers
+# ---------------- Plot helpers ----------------
 
 def plot_band_bar(band_dict: Dict) -> bytes:
     fig, ax = plt.subplots(figsize=(6,3))
@@ -430,14 +437,15 @@ def plot_connectivity_heatmap(mat: np.ndarray, chs: List[str]) -> bytes:
     plt.close(fig)
     return buf.getvalue()
 
-# PDF builder with Arabic readiness checks
+# ---------------- PDF builder with table-cell reshaping ----------------
 
 def build_pdf(results: Dict, patient_info: Dict, lab_results: Dict, meds: List[str], lang='en', band_pngs: Dict[str, bytes]=None, conn_images: Dict[str, bytes]=None, interpretations: List[str]=None, risk_scores: Dict[str,float]=None) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4)
     styles = getSampleStyleSheet()
     use_ar_font = arabic_pdf_ready()
-    if lang=='ar' and use_ar_font:
+    # apply Amiri font if available
+    if use_ar_font:
         for s in ['Normal','Title','Heading2','Italic']:
             try:
                 styles[s].fontName='Amiri'
@@ -445,74 +453,74 @@ def build_pdf(results: Dict, patient_info: Dict, lab_results: Dict, meds: List[s
                 pass
     flow = []
     t = TEXTS[lang]
-    # If Arabic PDF isn't ready, fall back to English headings and include a clear note at top
-    if lang=='ar' and not use_ar_font:
-        flow.append(Paragraph('***Arabic PDF rendering not available (missing Amiri font or shaping libs). The report includes English text as fallback.***', styles['Normal']))
+    # If Arabic PDF isn't fully ready, notify and fall back headings
+    if lang == 'ar' and not use_ar_font:
+        flow.append(Paragraph('***Arabic PDF rendering not available (missing Amiri font or shaping libs). The report will include English text as fallback.***', styles['Normal']))
         flow.append(Spacer(1,6))
         t = TEXTS['en']
     # Title & subtitle
-    title_text = reshape_arabic(t['title']) if (lang=='ar' and use_ar_font) else t['title']
-    sub_text = reshape_arabic(t['subtitle']) if (lang=='ar' and use_ar_font) else t['subtitle']
+    title_text = cell_text_for_pdf(t['title'], lang, use_ar_font)
+    sub_text = cell_text_for_pdf(t['subtitle'], lang, use_ar_font)
     flow.append(Paragraph(title_text, styles['Title']))
     flow.append(Paragraph(sub_text, styles['Normal']))
     flow.append(Spacer(1, 12))
     flow.append(Paragraph(f"Generated: {results.get('timestamp','')}", styles['Normal']))
     flow.append(Spacer(1, 12))
     # Patient info
-    flow.append(Paragraph('Patient information:', styles['Heading2']))
+    flow.append(Paragraph(cell_text_for_pdf('Patient information:', lang, use_ar_font), styles['Heading2']))
     if any(patient_info.values()):
-        rows = [['Field', 'Value']]
+        rows = [[cell_text_for_pdf('Field', lang, use_ar_font), cell_text_for_pdf('Value', lang, use_ar_font)]]
         for k,v in patient_info.items():
-            rows.append([str(k), str(v)])
+            rows.append([cell_text_for_pdf(str(k), lang, use_ar_font), cell_text_for_pdf(str(v), lang, use_ar_font)])
         table = Table(rows, colWidths=[150,300])
         table.setStyle(TableStyle([('GRID',(0,0),(-1,-1),0.25,colors.black),('BACKGROUND',(0,0),(-1,0),colors.lightgrey)]))
         flow.append(table)
     else:
-        flow.append(Paragraph('No patient info provided.', styles['Normal']))
+        flow.append(Paragraph(cell_text_for_pdf('No patient info provided.', lang, use_ar_font), styles['Normal']))
     flow.append(Spacer(1,12))
     # EEG files
-    flow.append(Paragraph('EEG & QEEG results:', styles['Heading2']))
+    flow.append(Paragraph(cell_text_for_pdf('EEG & QEEG results:', lang, use_ar_font), styles['Heading2']))
     for fname, block in results.get('EEG_files', {}).items():
-        flow.append(Paragraph(f'File: {fname}', styles['Heading2']))
-        rows = [['Band','Absolute','Relative']]
+        flow.append(Paragraph(cell_text_for_pdf(f'File: {fname}', lang, use_ar_font), styles['Heading2']))
+        rows = [[cell_text_for_pdf('Band', lang, use_ar_font), cell_text_for_pdf('Absolute', lang, use_ar_font), cell_text_for_pdf('Relative', lang, use_ar_font)]]
         for k,v in block.get('bands', {}).items():
             rel = block.get('relative', {}).get(k,0)
-            rows.append([k, f"{v:.4f}", f"{rel:.4f}"])
+            rows.append([cell_text_for_pdf(k, lang, use_ar_font), cell_text_for_pdf(f"{v:.4f}", lang, use_ar_font), cell_text_for_pdf(f"{rel:.4f}", lang, use_ar_font)])
         tble = Table(rows, colWidths=[120,120,120])
         tble.setStyle(TableStyle([('GRID',(0,0),(-1,-1),0.25,colors.black),('BACKGROUND',(0,0),(-1,0),colors.lightgrey)]))
         flow.append(tble)
         flow.append(Spacer(1,6))
-        qrows = [['Feature','Value']]
+        qrows = [[cell_text_for_pdf('Feature', lang, use_ar_font), cell_text_for_pdf('Value', lang, use_ar_font)]]
         for kk,vv in block.get('QEEG', {}).items():
-            qrows.append([str(kk), fmt(vv)])
+            qrows.append([cell_text_for_pdf(str(kk), lang, use_ar_font), cell_text_for_pdf(fmt(vv), lang, use_ar_font)])
         qtab = Table(qrows, colWidths=[240,120])
         qtab.setStyle(TableStyle([('GRID',(0,0),(-1,-1),0.25,colors.black),('BACKGROUND',(0,0),(-1,0),colors.lightgrey)]))
         flow.append(qtab)
         flow.append(Spacer(1,6))
         conn = block.get('connectivity', {})
         if conn:
-            flow.append(Paragraph('Connectivity summary:', styles['Normal']))
+            flow.append(Paragraph(cell_text_for_pdf('Connectivity summary:', lang, use_ar_font), styles['Normal']))
             if conn.get('error'):
-                flow.append(Paragraph(f"Connectivity: {conn.get('error')}", styles['Normal']))
+                flow.append(Paragraph(cell_text_for_pdf(f"Connectivity: {conn.get('error')}", lang, use_ar_font), styles['Normal']))
             else:
                 for ck,cv in conn.items():
                     if ck=='matrix': continue
-                    flow.append(Paragraph(f"{ck}: {fmt(cv)}", styles['Normal']))
+                    flow.append(Paragraph(cell_text_for_pdf(f"{ck}: {fmt(cv)}", lang, use_ar_font), styles['Normal']))
         if risk_scores and fname in risk_scores:
-            flow.append(Spacer(1,6)); flow.append(Paragraph(f"Contextualized risk (prelim.): {risk_scores[fname]:.1f}%", styles['Normal']))
+            flow.append(Spacer(1,6)); flow.append(Paragraph(cell_text_for_pdf(f"Contextualized risk (prelim.): {risk_scores[fname]:.1f}%", lang, use_ar_font), styles['Normal']))
         if band_pngs and fname in band_pngs:
             flow.append(RLImage(io.BytesIO(band_pngs[fname]), width=400, height=140)); flow.append(Spacer(1,6))
         if conn_images and fname in conn_images and not results['EEG_files'][fname].get('connectivity',{}).get('error'):
             flow.append(RLImage(io.BytesIO(conn_images[fname]), width=400, height=200)); flow.append(Spacer(1,6))
         flow.append(Spacer(1,10))
-    flow.append(Paragraph('Automated interpretation (heuristic):', styles['Heading2']))
+    flow.append(Paragraph(cell_text_for_pdf('Automated interpretation (heuristic):', lang, use_ar_font), styles['Heading2']))
     if interpretations:
         for line in interpretations:
-            flow.append(Paragraph(line, styles['Normal']))
+            flow.append(Paragraph(cell_text_for_pdf(line, lang, use_ar_font), styles['Normal']))
     else:
-        flow.append(Paragraph('No heuristic interpretations.', styles['Normal']))
+        flow.append(Paragraph(cell_text_for_pdf('No heuristic interpretations.', lang, use_ar_font), styles['Normal']))
     flow.append(Spacer(1,12))
-    flow.append(Paragraph('Structured recommendations (for clinician):', styles['Heading2']))
+    flow.append(Paragraph(cell_text_for_pdf('Structured recommendations (for clinician):', lang, use_ar_font), styles['Heading2']))
     recs = [
         'Correlate QEEG/connectivity findings with PHQ-9 and AD8 and clinical interview.',
         'If PHQ-9 suggests moderate/severe depression or left frontal alpha asymmetry found, consider psychiatric referral and treatment planning (psychotherapy ± pharmacotherapy).',
@@ -522,14 +530,14 @@ def build_pdf(results: Dict, patient_info: Dict, lab_results: Dict, meds: List[s
         'If suicidal ideation present (PHQ-9 item), arrange urgent psychiatric evaluation.'
     ]
     for r in recs:
-        flow.append(Paragraph(r, styles['Normal']))
+        flow.append(Paragraph(cell_text_for_pdf(r, lang, use_ar_font), styles['Normal']))
     flow.append(Spacer(1,12))
-    flow.append(Paragraph(TEXTS['en']['note'], styles['Italic']))
+    flow.append(Paragraph(cell_text_for_pdf(TEXTS['en']['note'], lang, use_ar_font), styles['Italic']))
     doc.build(flow)
     buf.seek(0)
     return buf.getvalue()
 
-# Streamlit UI
+# ---------------- Streamlit UI ----------------
 st.set_page_config(page_title='NeuroEarly Pro — Clinical', layout='wide')
 st.write('✅ App started — loading UI...')
 
@@ -537,7 +545,7 @@ st.sidebar.title('🌐 Language / اللغة')
 lang = st.sidebar.radio('Choose / اختر', ['en', 'ar'])
 t = TEXTS[lang]
 
-# If Arabic tools/font missing, show clear guidance
+# Arabic readiness warning in sidebar
 if lang == 'ar' and not arabic_pdf_ready():
     st.sidebar.warning('Arabic PDF rendering requires: (1) Amiri-Regular.ttf in the app root, and (2) packages arabic-reshaper and python-bidi installed. PDF will fall back to English if missing.')
 
@@ -579,13 +587,14 @@ with st.expander(L('💊 Current medications (one per line) / الأدوية ا�
     meds_text = st.text_area(L('List medications / اكتب الأدوية', lang), height=120)
 meds_list = [m.strip() for m in meds_text.splitlines() if m.strip()]
 
-# Tabs and main containers
+# Tabs
 tab_upload, tab_phq, tab_ad8, tab_report = st.tabs([L(t['upload'], lang), L(t['phq9'], lang), L(t['ad8'], lang), L(t['report'], lang)])
+
 EEG_results = {'EEG_files': {}}
 band_pngs = {}
 conn_imgs = {}
 
-# Upload tab
+# Upload
 with tab_upload:
     st.header(L(t['upload'], lang))
     uploaded_files = st.file_uploader(L('EDF files / ملفات EDF', lang), type=['edf'], accept_multiple_files=True)
@@ -703,15 +712,20 @@ with tab_report:
         for fname, block in EEG_results['EEG_files'].items():
             qi = block.get('QEEG', {})
             conn = block.get('connectivity', {})
-            if qi.get('alpha_asym_F3_F4', None) is not None:
-                a = qi['alpha_asym_F3_F4']
+            # heuristic interpretations
+            asym_key = None
+            for k in qi.keys():
+                if k.startswith('alpha_asym_'):
+                    asym_key = k; break
+            if asym_key and qi.get(asym_key) is not None:
+                a = qi[asym_key]
                 if a > 0.2:
-                    interpretations.append(f"{fname}: Left frontal alpha > right (F3>F4) — pattern reported in depression studies.")
+                    interpretations.append(f"{fname}: Left frontal alpha > right — pattern reported in depression studies.")
                 elif a < -0.2:
-                    interpretations.append(f"{fname}: Right frontal alpha > left (F4>F3).")
+                    interpretations.append(f"{fname}: Right frontal alpha > left — note asymmetry.")
             ta = qi.get('Theta_Alpha_ratio')
             if ta and ta > 1.2:
-                interpretations.append(f"{fname}: Elevated Theta/Alpha ratio ({fmt(ta)}). Consider cognitive follow-up.")
+                interpretations.append(f"{fname}: Elevated Theta/Alpha ratio ({fmt(ta)}). Recommend cognitive follow-up.")
             conn_summary = {'mean_connectivity': conn.get('mean_connectivity')} if conn and 'mean_connectivity' in conn else {}
             ctxt = compute_contextualized_risk(qi, conn_summary, age=patient_info.get('age'), sex=patient_info.get('gender'))
             risk_scores[fname] = ctxt['risk_percent']
@@ -745,7 +759,7 @@ with tab_report:
     st.markdown('---')
     st.info(L(TEXTS[lang]['note'], lang))
 
-# Installation & notes
+# Installation notes
 with st.expander(L('Installation & Notes / ملاحظات التثبيت', lang)):
     st.write('Create a requirements.txt with these packages:')
     st.code("""
