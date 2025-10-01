@@ -1,15 +1,9 @@
-# app.py — NeuroEarly Pro (Final v4)
-# Complete, polished Streamlit app (EN + AR)
-# Features:
-# - Multi-EDF upload, preprocessing (filter, notch, downsample), optional ICA (requires scikit-learn)
-# - QEEG band powers, Theta/Alpha & Theta/Beta ratios, frontal alpha asymmetry
-# - Connectivity analysis when MNE available; clear warning if not computable
-# - PHQ-9 & AD8 questionnaires (correct, bilingual)
-# - Patient form, labs, medications archive
-# - Contextualized risk score (synthetic ML model fallback)
-# - JSON/CSV/PDF export; JSON serialization safe for numpy/pandas/mne types
-# - Arabic rendering via arabic_reshaper + bidi if available; Amiri font support for PDF
-# - Defensive coding to avoid blank page / common runtime errors
+# app.py — NeuroEarly Pro (Final v4.1)
+# Polished update: fixes for Arabic PDF shaping and PHQ-9/AD8 wording issues.
+# - If Arabic runtime/tools/font missing, PDF will include clear notice and English fallback.
+# - UI shows a warning if Arabic shaping resources are missing.
+# - PHQ-9/AD8 phrasing double-checked and corrected for both EN and AR.
+# - JSON serialization and connectivity behavior preserved from v4.
 
 import io
 import os
@@ -23,7 +17,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
 
-# Optional scientific libs
+# Optional libs
 try:
     import mne
     HAS_MNE = True
@@ -53,7 +47,6 @@ try:
 except Exception:
     HAS_SCIPY = False
 
-# PDF libraries
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
@@ -83,7 +76,8 @@ def reshape_arabic(text: str) -> str:
 
 
 def L(text: str, lang: str) -> str:
-    return reshape_arabic(text) if lang == 'ar' else text
+    # Localize for UI (reshaped if Arabic tools present)
+    return reshape_arabic(text) if lang == 'ar' and HAS_ARABIC_TOOLS else text
 
 
 def fmt(x: Any) -> str:
@@ -93,23 +87,20 @@ def fmt(x: Any) -> str:
         return str(x)
 
 
-# JSON serialization helper
+# Serialization helper
 def make_serializable(obj: Any):
-    # numpy arrays
     if isinstance(obj, np.ndarray):
         return obj.tolist()
     if isinstance(obj, (np.floating, np.float32, np.float64)):
         return float(obj)
     if isinstance(obj, (np.integer, np.int32, np.int64)):
         return int(obj)
-    # pandas
     try:
         import pandas as _pd
         if isinstance(obj, (_pd.Series, _pd.DataFrame)):
             return obj.to_dict(orient='records')
     except Exception:
         pass
-    # mne Raw
     try:
         if HAS_MNE and isinstance(obj, mne.io.BaseRaw):
             return {'n_channels': len(getattr(obj, 'ch_names', [])), 'sfreq': obj.info.get('sfreq') if hasattr(obj, 'info') else None}
@@ -117,8 +108,7 @@ def make_serializable(obj: Any):
         pass
     return str(obj)
 
-
-# Texts with corrected PHQ-9 / AD8
+# Texts
 TEXTS = {
     'en': {
         'title': '🧠 NeuroEarly Pro — Clinical Assistant',
@@ -175,7 +165,7 @@ TEXTS = {
             'الشعور بالحزن أو الاكتئاب أو اليأس',
             'مشاكل في النوم أو النوم المفرط',
             'الشعور بالتعب أو قلة الطاقة',
-            'تغيرات في الشهية (قِلَّة أو إفراط في الأكل)',
+            'تغيرات في الشهية (قِلَّة أو الإفراط في الأكل)',
             'الشعور بسوء تجاه النفس أو أنك فاشل أو قد خيبت أمل نفسك أو أسرتك',
             'صعوبة في التركيز في أمور مثل القراءة أو مشاهدة التلفاز',
             'الحركة أو الكلام ببطء شديد بحيث يلاحظه الآخرون، أو العكس — فرط الحركة',
@@ -196,7 +186,11 @@ TEXTS = {
     }
 }
 
-# Preprocessing, QEEG
+# Utility: is Arabic PDF rendering ready?
+def arabic_pdf_ready():
+    return HAS_ARABIC_TOOLS and os.path.exists(AMIRI_PATH)
+
+# Preprocessing & QEEG (same as before)
 
 def preprocess_raw(raw, l_freq=1.0, h_freq=45.0, notch_freqs: Optional[List[int]] = DEFAULT_NOTCH, downsample: Optional[int] = None):
     try:
@@ -288,7 +282,7 @@ def compute_qeeg_features_safe(raw):
         feats = {'Theta_Alpha_ratio': float(np.random.uniform(0.6, 1.6)), 'Theta_Beta_ratio': float(np.random.uniform(0.6, 1.6))}
         return feats, bp
 
-# Connectivity safe: return error messages, no random matrices shown to user
+# Connectivity safe
 
 def compute_connectivity_final_safe(raw, method='wpli', fmin=4.0, fmax=30.0, epoch_len=2.0, picks: Optional[List[str]] = None, mode='fourier', n_jobs=1):
     if not HAS_MNE:
@@ -407,6 +401,7 @@ def compute_contextualized_risk(qeeg_feats: Dict, conn_summary: Dict, age: Optio
     return {'combined_z': combined_z, 'percentile_vs_norm': percentile, 'risk_percent': prob}
 
 # Plot helpers
+
 def plot_band_bar(band_dict: Dict) -> bytes:
     fig, ax = plt.subplots(figsize=(6,3))
     ax.bar(list(band_dict.keys()), list(band_dict.values()))
@@ -435,12 +430,14 @@ def plot_connectivity_heatmap(mat: np.ndarray, chs: List[str]) -> bytes:
     plt.close(fig)
     return buf.getvalue()
 
-# PDF builder
+# PDF builder with Arabic readiness checks
+
 def build_pdf(results: Dict, patient_info: Dict, lab_results: Dict, meds: List[str], lang='en', band_pngs: Dict[str, bytes]=None, conn_images: Dict[str, bytes]=None, interpretations: List[str]=None, risk_scores: Dict[str,float]=None) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4)
     styles = getSampleStyleSheet()
-    if lang=='ar' and os.path.exists(AMIRI_PATH):
+    use_ar_font = arabic_pdf_ready()
+    if lang=='ar' and use_ar_font:
         for s in ['Normal','Title','Heading2','Italic']:
             try:
                 styles[s].fontName='Amiri'
@@ -448,66 +445,74 @@ def build_pdf(results: Dict, patient_info: Dict, lab_results: Dict, meds: List[s
                 pass
     flow = []
     t = TEXTS[lang]
-    flow.append(Paragraph(L(t['title'], lang), styles['Title']))
-    flow.append(Paragraph(L(t['subtitle'], lang), styles['Normal']))
+    # If Arabic PDF isn't ready, fall back to English headings and include a clear note at top
+    if lang=='ar' and not use_ar_font:
+        flow.append(Paragraph('***Arabic PDF rendering not available (missing Amiri font or shaping libs). The report includes English text as fallback.***', styles['Normal']))
+        flow.append(Spacer(1,6))
+        t = TEXTS['en']
+    # Title & subtitle
+    title_text = reshape_arabic(t['title']) if (lang=='ar' and use_ar_font) else t['title']
+    sub_text = reshape_arabic(t['subtitle']) if (lang=='ar' and use_ar_font) else t['subtitle']
+    flow.append(Paragraph(title_text, styles['Title']))
+    flow.append(Paragraph(sub_text, styles['Normal']))
     flow.append(Spacer(1, 12))
-    flow.append(Paragraph(L(f"Generated: {results.get('timestamp','')}", lang), styles['Normal']))
+    flow.append(Paragraph(f"Generated: {results.get('timestamp','')}", styles['Normal']))
     flow.append(Spacer(1, 12))
     # Patient info
-    flow.append(Paragraph(L('Patient information:', lang), styles['Heading2']))
+    flow.append(Paragraph('Patient information:', styles['Heading2']))
     if any(patient_info.values()):
-        rows = [[L('Field', lang), L('Value', lang)]]
+        rows = [['Field', 'Value']]
         for k,v in patient_info.items():
-            rows.append([L(str(k), lang), L(str(v), lang)])
+            rows.append([str(k), str(v)])
         table = Table(rows, colWidths=[150,300])
         table.setStyle(TableStyle([('GRID',(0,0),(-1,-1),0.25,colors.black),('BACKGROUND',(0,0),(-1,0),colors.lightgrey)]))
         flow.append(table)
     else:
-        flow.append(Paragraph(L('No patient info provided.', lang), styles['Normal']))
+        flow.append(Paragraph('No patient info provided.', styles['Normal']))
     flow.append(Spacer(1,12))
     # EEG files
-    flow.append(Paragraph(L('EEG & QEEG results:', lang), styles['Heading2']))
+    flow.append(Paragraph('EEG & QEEG results:', styles['Heading2']))
     for fname, block in results.get('EEG_files', {}).items():
-        flow.append(Paragraph(L(f'File: {fname}', lang), styles['Heading2']))
-        rows = [[L('Band', lang), L('Absolute', lang), L('Relative', lang)]]
+        flow.append(Paragraph(f'File: {fname}', styles['Heading2']))
+        rows = [['Band','Absolute','Relative']]
         for k,v in block.get('bands', {}).items():
             rel = block.get('relative', {}).get(k,0)
-            rows.append([L(k, lang), f"{v:.4f}", f"{rel:.4f}"])
+            rows.append([k, f"{v:.4f}", f"{rel:.4f}"])
         tble = Table(rows, colWidths=[120,120,120])
         tble.setStyle(TableStyle([('GRID',(0,0),(-1,-1),0.25,colors.black),('BACKGROUND',(0,0),(-1,0),colors.lightgrey)]))
         flow.append(tble)
         flow.append(Spacer(1,6))
-        qrows = [[L('Feature', lang), L('Value', lang)]]
+        qrows = [['Feature','Value']]
         for kk,vv in block.get('QEEG', {}).items():
-            qrows.append([L(str(kk), lang), L(str(fmt(vv)), lang)])
+            qrows.append([str(kk), fmt(vv)])
         qtab = Table(qrows, colWidths=[240,120])
         qtab.setStyle(TableStyle([('GRID',(0,0),(-1,-1),0.25,colors.black),('BACKGROUND',(0,0),(-1,0),colors.lightgrey)]))
         flow.append(qtab)
         flow.append(Spacer(1,6))
         conn = block.get('connectivity', {})
         if conn:
-            flow.append(Paragraph(L('Connectivity summary:', lang), styles['Normal']))
+            flow.append(Paragraph('Connectivity summary:', styles['Normal']))
             if conn.get('error'):
-                flow.append(Paragraph(L(f"Connectivity: {conn.get('error')}", lang), styles['Normal']))
+                flow.append(Paragraph(f"Connectivity: {conn.get('error')}", styles['Normal']))
             else:
                 for ck,cv in conn.items():
                     if ck=='matrix': continue
-                    flow.append(Paragraph(L(f"{ck}: {fmt(cv)}", lang), styles['Normal']))
+                    flow.append(Paragraph(f"{ck}: {fmt(cv)}", styles['Normal']))
         if risk_scores and fname in risk_scores:
-            flow.append(Spacer(1,6)); flow.append(Paragraph(L(f"Contextualized risk (prelim.): {risk_scores[fname]:.1f}%", lang), styles['Normal']))
+            flow.append(Spacer(1,6)); flow.append(Paragraph(f"Contextualized risk (prelim.): {risk_scores[fname]:.1f}%", styles['Normal']))
         if band_pngs and fname in band_pngs:
             flow.append(RLImage(io.BytesIO(band_pngs[fname]), width=400, height=140)); flow.append(Spacer(1,6))
         if conn_images and fname in conn_images and not results['EEG_files'][fname].get('connectivity',{}).get('error'):
             flow.append(RLImage(io.BytesIO(conn_images[fname]), width=400, height=200)); flow.append(Spacer(1,6))
         flow.append(Spacer(1,10))
-    flow.append(Paragraph(L('Automated interpretation (heuristic):', lang), styles['Heading2']))
+    flow.append(Paragraph('Automated interpretation (heuristic):', styles['Heading2']))
     if interpretations:
         for line in interpretations:
-            flow.append(Paragraph(L(line, lang), styles['Normal']))
+            flow.append(Paragraph(line, styles['Normal']))
     else:
-        flow.append(Paragraph(L('No heuristic interpretations.', lang), styles['Normal']))
+        flow.append(Paragraph('No heuristic interpretations.', styles['Normal']))
     flow.append(Spacer(1,12))
-    flow.append(Paragraph(L('Structured recommendations (for clinician):', lang), styles['Heading2']))
+    flow.append(Paragraph('Structured recommendations (for clinician):', styles['Heading2']))
     recs = [
         'Correlate QEEG/connectivity findings with PHQ-9 and AD8 and clinical interview.',
         'If PHQ-9 suggests moderate/severe depression or left frontal alpha asymmetry found, consider psychiatric referral and treatment planning (psychotherapy ± pharmacotherapy).',
@@ -517,21 +522,24 @@ def build_pdf(results: Dict, patient_info: Dict, lab_results: Dict, meds: List[s
         'If suicidal ideation present (PHQ-9 item), arrange urgent psychiatric evaluation.'
     ]
     for r in recs:
-        flow.append(Paragraph(L(r, lang), styles['Normal']))
+        flow.append(Paragraph(r, styles['Normal']))
     flow.append(Spacer(1,12))
-    flow.append(Paragraph(L(TEXTS['en']['note'], lang), styles['Italic']))
+    flow.append(Paragraph(TEXTS['en']['note'], styles['Italic']))
     doc.build(flow)
     buf.seek(0)
     return buf.getvalue()
 
 # Streamlit UI
 st.set_page_config(page_title='NeuroEarly Pro — Clinical', layout='wide')
-# startup message
 st.write('✅ App started — loading UI...')
 
 st.sidebar.title('🌐 Language / اللغة')
 lang = st.sidebar.radio('Choose / اختر', ['en', 'ar'])
 t = TEXTS[lang]
+
+# If Arabic tools/font missing, show clear guidance
+if lang == 'ar' and not arabic_pdf_ready():
+    st.sidebar.warning('Arabic PDF rendering requires: (1) Amiri-Regular.ttf in the app root, and (2) packages arabic-reshaper and python-bidi installed. PDF will fall back to English if missing.')
 
 st.title(L(t['title'], lang))
 st.write(L(t['subtitle'], lang))
@@ -571,9 +579,8 @@ with st.expander(L('💊 Current medications (one per line) / الأدوية ا�
     meds_text = st.text_area(L('List medications / اكتب الأدوية', lang), height=120)
 meds_list = [m.strip() for m in meds_text.splitlines() if m.strip()]
 
-# Tabs
+# Tabs and main containers
 tab_upload, tab_phq, tab_ad8, tab_report = st.tabs([L(t['upload'], lang), L(t['phq9'], lang), L(t['ad8'], lang), L(t['report'], lang)])
-
 EEG_results = {'EEG_files': {}}
 band_pngs = {}
 conn_imgs = {}
@@ -644,7 +651,7 @@ with tab_upload:
             except Exception as e:
                 st.error(L(f'Error processing {f.name}: {e}', lang))
 
-# PHQ-9 tab
+# PHQ-9
 with tab_phq:
     st.header(L(t['phq9'], lang))
     phq_qs = TEXTS[lang]['phq9_questions']
@@ -670,7 +677,7 @@ with tab_phq:
         phq_risk = 'Severe'
     st.write(L(f'PHQ-9 Score: **{phq_score}** → {phq_risk}', lang))
 
-# AD8 tab
+# AD8
 with tab_ad8:
     st.header(L(t['ad8'], lang))
     ad8_qs = TEXTS[lang]['ad8_questions']
@@ -684,7 +691,7 @@ with tab_ad8:
     ad8_risk = 'Low' if ad8_score < 2 else 'Possible concern'
     st.write(L(f'AD8 Score: **{ad8_score}** → {ad8_risk}', lang))
 
-# Report tab
+# Report
 with tab_report:
     st.header(L(t['report'], lang))
     if st.button(L('Generate', lang)):
@@ -709,13 +716,13 @@ with tab_report:
             ctxt = compute_contextualized_risk(qi, conn_summary, age=patient_info.get('age'), sex=patient_info.get('gender'))
             risk_scores[fname] = ctxt['risk_percent']
             interpretations.append(f"{fname}: Contextualized risk ~ {ctxt['risk_percent']:.1f}% (percentile {ctxt['percentile_vs_norm']:.1f}).")
-        # JSON export
+        # JSON
         try:
             json_bytes = io.BytesIO(json.dumps(EEG_results, indent=2, ensure_ascii=False, default=make_serializable).encode())
             st.download_button(L(TEXTS[lang]['download_json'], lang), json_bytes, file_name='report.json')
         except Exception as e:
             st.warning(L(f'JSON export failed: {e}', lang))
-        # CSV export
+        # CSV
         try:
             if EEG_results['EEG_files']:
                 rows=[]
@@ -728,7 +735,7 @@ with tab_report:
                 st.download_button(L(TEXTS[lang]['download_csv'], lang), df.to_csv(index=False).encode('utf-8'), file_name='qeeg_features.csv', mime='text/csv')
         except Exception as e:
             st.warning(L(f'CSV export failed: {e}', lang))
-        # PDF export
+        # PDF
         try:
             pdfb = build_pdf(EEG_results, patient_info, lab_results, meds_list, lang=lang, band_pngs=band_pngs, conn_images=conn_imgs, interpretations=interpretations, risk_scores=risk_scores)
             st.download_button(L(TEXTS[lang]['download_pdf'], lang), pdfb, file_name='report.pdf')
@@ -738,7 +745,7 @@ with tab_report:
     st.markdown('---')
     st.info(L(TEXTS[lang]['note'], lang))
 
-# Installation notes
+# Installation & notes
 with st.expander(L('Installation & Notes / ملاحظات التثبيت', lang)):
     st.write('Create a requirements.txt with these packages:')
     st.code("""
@@ -755,4 +762,4 @@ scipy
 """)
     st.write(L('If compute_connectivity is slow: avoid enabling it on very long recordings. ICA requires scikit-learn. ML model is preliminary and trained on synthetic data — calibrate with local labeled data before clinical use.', lang))
 
-# End of file
+# EOF
