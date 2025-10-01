@@ -1,11 +1,15 @@
-# app.py — NeuroEarly Pro (Final v3.3)
-# Final polished version (EN + AR)
-# Changes in v3.3:
-# - Fixed JSON serialization (ndarray / numpy types -> python types)
-# - PHQ-9 and AD8 questions/options corrected and verified (EN & AR)
-# - Connectivity fallback: DO NOT show random heatmap; show a clear warning if connectivity couldn't be computed
-# - Preserve previous features: multi-EDF, preprocessing, ICA optional, QEEG, patient form, labs/meds, PDF/CSV/JSON exports
-# - Defensive startup message so UI doesn't stay white on errors
+# app.py — NeuroEarly Pro (Final v4)
+# Complete, polished Streamlit app (EN + AR)
+# Features:
+# - Multi-EDF upload, preprocessing (filter, notch, downsample), optional ICA (requires scikit-learn)
+# - QEEG band powers, Theta/Alpha & Theta/Beta ratios, frontal alpha asymmetry
+# - Connectivity analysis when MNE available; clear warning if not computable
+# - PHQ-9 & AD8 questionnaires (correct, bilingual)
+# - Patient form, labs, medications archive
+# - Contextualized risk score (synthetic ML model fallback)
+# - JSON/CSV/PDF export; JSON serialization safe for numpy/pandas/mne types
+# - Arabic rendering via arabic_reshaper + bidi if available; Amiri font support for PDF
+# - Defensive coding to avoid blank page / common runtime errors
 
 import io
 import os
@@ -19,21 +23,13 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
 
-# Try MNE; fall back gracefully
+# Optional scientific libs
 try:
     import mne
     HAS_MNE = True
 except Exception:
     HAS_MNE = False
 
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.lib import colors
-
-# Arabic utilities
 try:
     import arabic_reshaper
     from bidi.algorithm import get_display
@@ -41,7 +37,6 @@ try:
 except Exception:
     HAS_ARABIC_TOOLS = False
 
-# sklearn / ML optional
 try:
     import sklearn
     HAS_SKLEARN = True
@@ -52,14 +47,21 @@ except Exception:
     StandardScaler = None
     LogisticRegression = None
 
-# scipy
 try:
     import scipy.stats as stats
     HAS_SCIPY = True
 except Exception:
     HAS_SCIPY = False
 
-# ---------------- Config ----------------
+# PDF libraries
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.lib import colors
+
+# Config
 AMIRI_PATH = "Amiri-Regular.ttf"
 BANDS = {"Delta": (0.5, 4), "Theta": (4, 8), "Alpha": (8, 12), "Beta": (12, 30), "Gamma": (30, 45)}
 DEFAULT_NOTCH = [50, 100]
@@ -72,7 +74,8 @@ if os.path.exists(AMIRI_PATH):
     except Exception:
         pass
 
-# ---------------- Helpers ----------------
+# Helpers
+
 def reshape_arabic(text: str) -> str:
     if HAS_ARABIC_TOOLS:
         return get_display(arabic_reshaper.reshape(text))
@@ -90,34 +93,32 @@ def fmt(x: Any) -> str:
         return str(x)
 
 
-# JSON-serializable helper
+# JSON serialization helper
 def make_serializable(obj: Any):
     # numpy arrays
     if isinstance(obj, np.ndarray):
         return obj.tolist()
-    # numpy scalar types
     if isinstance(obj, (np.floating, np.float32, np.float64)):
         return float(obj)
     if isinstance(obj, (np.integer, np.int32, np.int64)):
         return int(obj)
-    # pandas types
+    # pandas
     try:
         import pandas as _pd
         if isinstance(obj, (_pd.Series, _pd.DataFrame)):
             return obj.to_dict(orient='records')
     except Exception:
         pass
-    # mne objects — return simple repr
+    # mne Raw
     try:
         if HAS_MNE and isinstance(obj, mne.io.BaseRaw):
-            return {'info': getattr(obj, 'info', {})}
+            return {'n_channels': len(getattr(obj, 'ch_names', [])), 'sfreq': obj.info.get('sfreq') if hasattr(obj, 'info') else None}
     except Exception:
         pass
-    # fallback to string
     return str(obj)
 
 
-# ---------------- Texts (PHQ-9 & AD8 carefully phrased) ----------------
+# Texts with corrected PHQ-9 / AD8
 TEXTS = {
     'en': {
         'title': '🧠 NeuroEarly Pro — Clinical Assistant',
@@ -195,7 +196,7 @@ TEXTS = {
     }
 }
 
-# ---------------- EEG processing ----------------
+# Preprocessing, QEEG
 
 def preprocess_raw(raw, l_freq=1.0, h_freq=45.0, notch_freqs: Optional[List[int]] = DEFAULT_NOTCH, downsample: Optional[int] = None):
     try:
@@ -287,11 +288,11 @@ def compute_qeeg_features_safe(raw):
         feats = {'Theta_Alpha_ratio': float(np.random.uniform(0.6, 1.6)), 'Theta_Beta_ratio': float(np.random.uniform(0.6, 1.6))}
         return feats, bp
 
-# Connectivity: do NOT show random heatmap to user; show warning if connectivity failed
+# Connectivity safe: return error messages, no random matrices shown to user
 
 def compute_connectivity_final_safe(raw, method='wpli', fmin=4.0, fmax=30.0, epoch_len=2.0, picks: Optional[List[str]] = None, mode='fourier', n_jobs=1):
     if not HAS_MNE:
-        return {'error': 'mne not available'}
+        return {'error': 'mne not available in environment'}
     try:
         return compute_connectivity_final(raw, method=method, fmin=fmin, fmax=fmax, epoch_len=epoch_len, picks=picks, mode=mode, n_jobs=n_jobs)
     except Exception as e:
@@ -337,7 +338,7 @@ if HAS_MNE:
                 idx += 1
         return {'matrix': mat, 'channels': chs, 'mean_connectivity': float(np.nanmean(mean_con))}
 
-# Simple synthetic model + norms
+# Synthetic ML model + norms
 
 def build_synthetic_dataset(n=500):
     rng = np.random.RandomState(42)
@@ -496,7 +497,7 @@ def build_pdf(results: Dict, patient_info: Dict, lab_results: Dict, meds: List[s
             flow.append(Spacer(1,6)); flow.append(Paragraph(L(f"Contextualized risk (prelim.): {risk_scores[fname]:.1f}%", lang), styles['Normal']))
         if band_pngs and fname in band_pngs:
             flow.append(RLImage(io.BytesIO(band_pngs[fname]), width=400, height=140)); flow.append(Spacer(1,6))
-        if conn_images and fname in conn_images and not EEG_results['EEG_files'][fname].get('connectivity',{}).get('error'):
+        if conn_images and fname in conn_images and not results['EEG_files'][fname].get('connectivity',{}).get('error'):
             flow.append(RLImage(io.BytesIO(conn_images[fname]), width=400, height=200)); flow.append(Spacer(1,6))
         flow.append(Spacer(1,10))
     flow.append(Paragraph(L('Automated interpretation (heuristic):', lang), styles['Heading2']))
@@ -523,9 +524,9 @@ def build_pdf(results: Dict, patient_info: Dict, lab_results: Dict, meds: List[s
     buf.seek(0)
     return buf.getvalue()
 
-# ---------------- Streamlit UI ----------------
+# Streamlit UI
 st.set_page_config(page_title='NeuroEarly Pro — Clinical', layout='wide')
-# startup message to avoid white screen
+# startup message
 st.write('✅ App started — loading UI...')
 
 st.sidebar.title('🌐 Language / اللغة')
@@ -708,13 +709,13 @@ with tab_report:
             ctxt = compute_contextualized_risk(qi, conn_summary, age=patient_info.get('age'), sex=patient_info.get('gender'))
             risk_scores[fname] = ctxt['risk_percent']
             interpretations.append(f"{fname}: Contextualized risk ~ {ctxt['risk_percent']:.1f}% (percentile {ctxt['percentile_vs_norm']:.1f}).")
-        # JSON (serialize)
+        # JSON export
         try:
             json_bytes = io.BytesIO(json.dumps(EEG_results, indent=2, ensure_ascii=False, default=make_serializable).encode())
             st.download_button(L(TEXTS[lang]['download_json'], lang), json_bytes, file_name='report.json')
         except Exception as e:
             st.warning(L(f'JSON export failed: {e}', lang))
-        # CSV
+        # CSV export
         try:
             if EEG_results['EEG_files']:
                 rows=[]
@@ -727,7 +728,7 @@ with tab_report:
                 st.download_button(L(TEXTS[lang]['download_csv'], lang), df.to_csv(index=False).encode('utf-8'), file_name='qeeg_features.csv', mime='text/csv')
         except Exception as e:
             st.warning(L(f'CSV export failed: {e}', lang))
-        # PDF
+        # PDF export
         try:
             pdfb = build_pdf(EEG_results, patient_info, lab_results, meds_list, lang=lang, band_pngs=band_pngs, conn_images=conn_imgs, interpretations=interpretations, risk_scores=risk_scores)
             st.download_button(L(TEXTS[lang]['download_pdf'], lang), pdfb, file_name='report.pdf')
@@ -737,11 +738,21 @@ with tab_report:
     st.markdown('---')
     st.info(L(TEXTS[lang]['note'], lang))
 
-# Footer
+# Installation notes
 with st.expander(L('Installation & Notes / ملاحظات التثبيت', lang)):
     st.write('Create a requirements.txt with these packages:')
-    st.code('
-'.join(['streamlit','numpy','pandas','matplotlib','mne','scikit-learn','reportlab','arabic-reshaper','python-bidi','scipy']))
+    st.code("""
+streamlit
+numpy
+pandas
+matplotlib
+mne
+scikit-learn
+reportlab
+arabic-reshaper
+python-bidi
+scipy
+""")
     st.write(L('If compute_connectivity is slow: avoid enabling it on very long recordings. ICA requires scikit-learn. ML model is preliminary and trained on synthetic data — calibrate with local labeled data before clinical use.', lang))
 
-# End of Final v3.3
+# End of file
