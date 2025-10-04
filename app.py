@@ -1,6 +1,5 @@
-# app.py — NeuroEarly Pro (Final)
-# Full Streamlit app: multi-EDF, preprocessing, ICA (optional), QEEG, connectivity (safe),
-# PHQ-9/AD8 corrected, Arabic shaping in UI + PDF (tables & paragraphs), exports JSON/CSV/PDF.
+# app.py — NeuroEarly Pro (Professional Final)
+# Copy this file to project root. Place Amiri-Regular.ttf at project root for Arabic UI+PDF.
 
 import io
 import os
@@ -14,13 +13,14 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
 
-# try optional heavy libs
+# Optional heavy libs
 try:
     import mne
     HAS_MNE = True
 except Exception:
     HAS_MNE = False
 
+# PDF shaping libs (optional)
 try:
     import arabic_reshaper
     from bidi.algorithm import get_display
@@ -44,6 +44,7 @@ try:
 except Exception:
     HAS_SCIPY = False
 
+# reportlab for PDF
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
@@ -65,24 +66,13 @@ if os.path.exists(AMIRI_PATH):
         pass
 
 # ---------------- Helpers ----------------
-def reshape_arabic(text: str) -> str:
+def reshape_for_pdf(text: str) -> str:
+    """Use arabic_reshaper + bidi for PDF shaping if available."""
     if HAS_ARABIC_TOOLS:
         try:
             return get_display(arabic_reshaper.reshape(text))
         except Exception:
             return text
-    return text
-
-def arabic_pdf_ready() -> bool:
-    return HAS_ARABIC_TOOLS and os.path.exists(AMIRI_PATH)
-
-def L_ui(text: str, lang: str) -> str:
-    # For UI rendering: if arabic and tools present, reshape, else return original
-    return reshape_arabic(text) if (lang == 'ar' and HAS_ARABIC_TOOLS) else text
-
-def cell_text_for_pdf(text: str, lang: str, use_ar_font: bool) -> str:
-    if lang == 'ar' and use_ar_font and HAS_ARABIC_TOOLS:
-        return reshape_arabic(text)
     return text
 
 def fmt(x: Any) -> str:
@@ -92,7 +82,6 @@ def fmt(x: Any) -> str:
         return str(x)
 
 def make_serializable(obj: Any):
-    # convert numpy, pandas, mne minimal info etc.
     if isinstance(obj, np.ndarray):
         return obj.tolist()
     if isinstance(obj, (np.floating, np.float32, np.float64)):
@@ -112,14 +101,14 @@ def make_serializable(obj: Any):
         pass
     return str(obj)
 
-# ---------------- Texts (corrected PHQ9 & AD8) ----------------
+# ---------------- Texts ----------------
 TEXTS = {
     'en': {
-        'title': '🧠 NeuroEarly Pro — Clinical Assistant',
-        'subtitle': 'EEG + QEEG + Connectivity + Contextualized Risk (prototype). Research/decision-support only.',
-        'upload': '1) Upload EEG file(s) (.edf) — multiple allowed',
-        'clean': 'Apply ICA artifact removal (requires scikit-learn)',
-        'compute_connectivity': 'Compute Connectivity (coherence/PLI/wPLI) — optional, slow',
+        'title': '🧠 NeuroEarly Pro',
+        'subtitle': 'Prototype for early Alzheimer’s & Depression risk screening using EEG, QEEG and connectivity features.',
+        'upload': '1) Upload EEG file(s) (.edf)',
+        'clean': 'Apply ICA artifact removal (optional; requires scikit-learn)',
+        'compute_connectivity': 'Compute Connectivity (coh/PLI/wPLI) — optional, slow',
         'phq9': '2) Depression Screening — PHQ-9',
         'ad8': '3) Cognitive Screening — AD8',
         'report': '4) Generate Report (JSON / PDF / CSV)',
@@ -140,57 +129,57 @@ TEXTS = {
         ],
         'phq9_options': ['0 = Not at all', '1 = Several days', '2 = More than half the days', '3 = Nearly every day'],
         'ad8_questions': [
-            "Problems with judgment (for example, bad financial decisions)",
-            "Less interest in hobbies/activities",
-            "Repeats questions, stories, or statements",
-            "Trouble learning to use a tool, appliance, or gadget",
-            "Forgets the month or year",
-            "Difficulty handling complicated financial affairs (for example, balancing a checkbook)",
-            "Often forgets appointments",
-            "Overall thinking and memory are worse than before"
+            "Problems with judgment (e.g., poor financial decisions)",
+            "Reduced interest in hobbies/activities",
+            "Repeats questions or stories",
+            "Trouble using a tool or gadget",
+            "Forgets the correct month or year",
+            "Difficulty managing finances (e.g., paying bills)",
+            "Trouble remembering appointments",
+            "Everyday thinking is getting worse"
         ],
         'ad8_options': ['No', 'Yes']
     },
     'ar': {
-        'title': '🧠 نيوروإيرلي برو — مساعد سريري',
-        'subtitle': 'EEG و QEEG والتحليل الشبكي وتقييم المخاطر (نموذج تجريبي).',
-        'upload': '١) تحميل ملف(های) EEG (.edf) — امکان بارگذاری چندگانه',
-        'clean': 'إزالة المكونات المستقلة (ICA) (يتطلب scikit-learn)',
-        'compute_connectivity': 'حساب الاتصالات (coh/PLI/wPLI) — اختياري، بطيء',
+        'title': '🧠 نيوروإيرلي برو',
+        'subtitle': 'نموذج أولي للفحص المبكر لمخاطر الزهايمر والاكتئاب باستخدام EEG وQEEG وميزات الاتصال.',
+        'upload': '١) تحميل ملف(های) EEG (.edf)',
+        'clean': 'إزالة مكونات ICA (اختياري؛ يتطلب scikit-learn)',
+        'compute_connectivity': 'حساب الاتصالات (coh/PLI/wPLI) — اختياري وقد يكون بطيئًا',
         'phq9': '٢) استبيان الاكتئاب — PHQ-9',
         'ad8': '٣) الفحص المعرفي — AD8',
         'report': '٤) إنشاء التقرير (JSON / PDF / CSV)',
         'download_json': '⬇️ تنزيل JSON',
         'download_pdf': '⬇️ تنزيل PDF',
         'download_csv': '⬇️ تنزيل CSV',
-        'note': '⚠️ أداة بحثية / توجيهية فقط — ليست تشخيصًا نهائيًا.',
+        'note': '⚠️ أداة بحثية/مساعدة فقط — ليست تشخيصًا نهائيًا.',
         'phq9_questions': [
             "قلة الاهتمام أو المتعة في الأنشطة",
             "الشعور بالحزن أو الاكتئاب أو اليأس",
-            "مشاكل في النوم (قلة النوم أو النوم المفرط)",
+            "مشاكل في النوم (صعوبة في النوم أو النوم لفترات طويلة)",
             "الشعور بالتعب أو قلة الطاقة",
-            "فقدان الشهية أو الإفراط في الأكل",
-            "الشعور بأنك شخص سيء أو فاشل",
-            "صعوبة في التركيز مثل القراءة أو مشاهدة التلفاز",
-            "الحركة أو الكلام ببطء شديد أو فرط النشاط",
-            "أفكار بأنك أفضل حالًا ميتًا أو التفكير في إيذاء النفس"
+            "قِلّة الشهية أو الإفراط في الأكل",
+            "الشعور بسوء تجاه النفس أو الشعور بالفشل",
+            "صعوبة في التركيز (مثل القراءة أو مشاهدة التلفاز)",
+            "الحركة أو الكلام ببطء شديد، أو الشعور بفرط الحركة/القلق الحركي",
+            "أفكار بأنكِ/أنك ستكون أفضل حالًا لو كنت ميتًا أو التفكير في إيذاء النفس"
         ],
         'phq9_options': ['0 = أبداً', '1 = عدة أيام', '2 = أكثر من نصف الأيام', '3 = كل يوم تقريبًا'],
         'ad8_questions': [
-            "مشاكل في الحكم (مثل قرارات مالية سيئة)",
+            "مشاكل في الحكم (مثل اتخاذ قرارات مالية سيئة)",
             "انخفاض الاهتمام بالهوايات أو الأنشطة",
-            "تكرار الأسئلة أو القصص أو العبارات",
-            "صعوبة في تعلم استخدام أداة أو جهاز",
-            "نسيان الشهر أو السنة",
-            "صعوبة في التعامل مع الشؤون المالية المعقدة",
-            "غالبًا ما ينسى المواعيد",
-            "التفكير والذاكرة أسوأ من السابق"
+            "تكرار الأسئلة أو القصص",
+            "صعوبة في استخدام أداة أو جهاز",
+            "نسيان الشهر أو السنة الصحيحة",
+            "صعوبة في إدارة الشؤون المالية (مثل دفع الفواتير)",
+            "صعوبة في تذكر المواعيد",
+            "التفكير والذاكرة أسوأ مما كانت عليه سابقًا"
         ],
         'ad8_options': ['لا', 'نعم']
     }
 }
 
-# ---------------- EEG processing helpers ----------------
+# ---------------- EEG processing ----------------
 def preprocess_raw(raw, l_freq=1.0, h_freq=45.0, notch_freqs: Optional[List[int]] = DEFAULT_NOTCH, downsample: Optional[int] = None):
     try:
         raw = raw.copy()
@@ -279,7 +268,7 @@ def compute_qeeg_features_safe(raw):
         feats = {'Theta_Alpha_ratio': float(np.random.uniform(0.6, 1.6)), 'Theta_Beta_ratio': float(np.random.uniform(0.6, 1.6))}
         return feats, bp
 
-# Connectivity safe wrapper
+# Connectivity safe wrapper (same as earlier)
 def compute_connectivity_final_safe(raw, method='wpli', fmin=4.0, fmax=30.0, epoch_len=2.0, picks: Optional[List[str]] = None, mode='fourier', n_jobs=1):
     if not HAS_MNE:
         return {'error': 'mne not available in environment'}
@@ -328,7 +317,7 @@ if HAS_MNE:
                 idx += 1
         return {'matrix': mat, 'channels': chs, 'mean_connectivity': float(np.nanmean(mean_con))}
 
-# Synthetic ML model + norms (baseline)
+# Synthetic ML model + norms
 def build_synthetic_dataset(n=500):
     rng = np.random.RandomState(42)
     ta = rng.normal(1.0, 0.4, n)
@@ -392,7 +381,7 @@ def compute_contextualized_risk(qeeg_feats: Dict, conn_summary: Dict, age: Optio
         prob = percentile * 0.65
     return {'combined_z': combined_z, 'percentile_vs_norm': percentile, 'risk_percent': prob}
 
-# ---------------- Plot helpers ----------------
+# ---------------- Plots ----------------
 def plot_band_bar(band_dict: Dict) -> bytes:
     fig, ax = plt.subplots(figsize=(6,3))
     ax.bar(list(band_dict.keys()), list(band_dict.values()))
@@ -420,12 +409,12 @@ def plot_connectivity_heatmap(mat: np.ndarray, chs: List[str]) -> bytes:
     plt.close(fig)
     return buf.getvalue()
 
-# ---------------- PDF builder (table cell reshaping applied) ----------------
+# ---------------- PDF builder ----------------
 def build_pdf(results: Dict, patient_info: Dict, lab_results: Dict, meds: List[str], lang='en', band_pngs: Dict[str, bytes]=None, conn_images: Dict[str, bytes]=None, interpretations: List[str]=None, risk_scores: Dict[str,float]=None) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4)
     styles = getSampleStyleSheet()
-    use_ar_font = arabic_pdf_ready()
+    use_ar_font = os.path.exists(AMIRI_PATH) and HAS_ARABIC_TOOLS
     if use_ar_font:
         for s in ['Normal','Title','Heading2','Italic']:
             try:
@@ -435,71 +424,72 @@ def build_pdf(results: Dict, patient_info: Dict, lab_results: Dict, meds: List[s
     flow = []
     t = TEXTS[lang]
     if lang == 'ar' and not use_ar_font:
-        flow.append(Paragraph('***Arabic PDF rendering not available (missing Amiri font or shaping libs). The report will include English text as fallback.***', styles['Normal']))
+        flow.append(Paragraph('***Arabic PDF shaping not fully available (missing shaping libs). Report will include English fallback to avoid garbled text.***', styles['Normal']))
         flow.append(Spacer(1,6))
         t = TEXTS['en']
-    title_text = cell_text_for_pdf(t['title'], lang, use_ar_font)
-    sub_text = cell_text_for_pdf(t['subtitle'], lang, use_ar_font)
+    # Title
+    title_text = reshape_for_pdf(t['title']) if lang=='ar' else t['title']
+    sub_text = reshape_for_pdf(t['subtitle']) if lang=='ar' else t['subtitle']
     flow.append(Paragraph(title_text, styles['Title']))
     flow.append(Paragraph(sub_text, styles['Normal']))
-    flow.append(Spacer(1, 12))
+    flow.append(Spacer(1,12))
     flow.append(Paragraph(f"Generated: {results.get('timestamp','')}", styles['Normal']))
-    flow.append(Spacer(1, 12))
+    flow.append(Spacer(1,12))
     # Patient info
-    flow.append(Paragraph(cell_text_for_pdf('Patient information:', lang, use_ar_font), styles['Heading2']))
+    flow.append(Paragraph(reshape_for_pdf('Patient information:') if lang=='ar' else 'Patient information:', styles['Heading2']))
     if any(patient_info.values()):
-        rows = [[cell_text_for_pdf('Field', lang, use_ar_font), cell_text_for_pdf('Value', lang, use_ar_font)]]
+        rows = [[reshape_for_pdf('Field') if lang=='ar' else 'Field', reshape_for_pdf('Value') if lang=='ar' else 'Value']]
         for k,v in patient_info.items():
-            rows.append([cell_text_for_pdf(str(k), lang, use_ar_font), cell_text_for_pdf(str(v), lang, use_ar_font)])
+            rows.append([reshape_for_pdf(str(k)) if lang=='ar' else str(k), reshape_for_pdf(str(v)) if lang=='ar' else str(v)])
         table = Table(rows, colWidths=[150,300])
         table.setStyle(TableStyle([('GRID',(0,0),(-1,-1),0.25,colors.black),('BACKGROUND',(0,0),(-1,0),colors.lightgrey)]))
         flow.append(table)
     else:
-        flow.append(Paragraph(cell_text_for_pdf('No patient info provided.', lang, use_ar_font), styles['Normal']))
+        flow.append(Paragraph(reshape_for_pdf('No patient info provided.') if lang=='ar' else 'No patient info provided.', styles['Normal']))
     flow.append(Spacer(1,12))
     # EEG files
-    flow.append(Paragraph(cell_text_for_pdf('EEG & QEEG results:', lang, use_ar_font), styles['Heading2']))
+    flow.append(Paragraph(reshape_for_pdf('EEG & QEEG results:') if lang=='ar' else 'EEG & QEEG results:', styles['Heading2']))
     for fname, block in results.get('EEG_files', {}).items():
-        flow.append(Paragraph(cell_text_for_pdf(f'File: {fname}', lang, use_ar_font), styles['Heading2']))
-        rows = [[cell_text_for_pdf('Band', lang, use_ar_font), cell_text_for_pdf('Absolute', lang, use_ar_font), cell_text_for_pdf('Relative', lang, use_ar_font)]]
+        flow.append(Paragraph(reshape_for_pdf(f'File: {fname}') if lang=='ar' else f'File: {fname}', styles['Heading2']))
+        rows = [[reshape_for_pdf('Band') if lang=='ar' else 'Band', reshape_for_pdf('Absolute') if lang=='ar' else 'Absolute', reshape_for_pdf('Relative') if lang=='ar' else 'Relative']]
         for k,v in block.get('bands', {}).items():
             rel = block.get('relative', {}).get(k,0)
-            rows.append([cell_text_for_pdf(k, lang, use_ar_font), cell_text_for_pdf(f"{v:.4f}", lang, use_ar_font), cell_text_for_pdf(f"{rel:.4f}", lang, use_ar_font)])
+            rows.append([reshape_for_pdf(k) if lang=='ar' else k, reshape_for_pdf(f"{v:.4f}") if lang=='ar' else f"{v:.4f}", reshape_for_pdf(f"{rel:.4f}") if lang=='ar' else f"{rel:.4f}"])
         tble = Table(rows, colWidths=[120,120,120])
         tble.setStyle(TableStyle([('GRID',(0,0),(-1,-1),0.25,colors.black),('BACKGROUND',(0,0),(-1,0),colors.lightgrey)]))
         flow.append(tble)
         flow.append(Spacer(1,6))
-        qrows = [[cell_text_for_pdf('Feature', lang, use_ar_font), cell_text_for_pdf('Value', lang, use_ar_font)]]
+        qrows = [[reshape_for_pdf('Feature') if lang=='ar' else 'Feature', reshape_for_pdf('Value') if lang=='ar' else 'Value']]
         for kk,vv in block.get('QEEG', {}).items():
-            qrows.append([cell_text_for_pdf(str(kk), lang, use_ar_font), cell_text_for_pdf(fmt(vv), lang, use_ar_font)])
+            qrows.append([reshape_for_pdf(str(kk)) if lang=='ar' else str(kk), reshape_for_pdf(fmt(vv)) if lang=='ar' else fmt(vv)])
         qtab = Table(qrows, colWidths=[240,120])
         qtab.setStyle(TableStyle([('GRID',(0,0),(-1,-1),0.25,colors.black),('BACKGROUND',(0,0),(-1,0),colors.lightgrey)]))
         flow.append(qtab)
         flow.append(Spacer(1,6))
         conn = block.get('connectivity', {})
         if conn:
-            flow.append(Paragraph(cell_text_for_pdf('Connectivity summary:', lang, use_ar_font), styles['Normal']))
+            flow.append(Paragraph(reshape_for_pdf('Connectivity summary:') if lang=='ar' else 'Connectivity summary:', styles['Normal']))
             if conn.get('error'):
-                flow.append(Paragraph(cell_text_for_pdf(f"Connectivity: {conn.get('error')}", lang, use_ar_font), styles['Normal']))
+                flow.append(Paragraph(reshape_for_pdf(f"Connectivity: {conn.get('error')}") if lang=='ar' else f"Connectivity: {conn.get('error')}", styles['Normal']))
             else:
                 for ck,cv in conn.items():
                     if ck=='matrix': continue
-                    flow.append(Paragraph(cell_text_for_pdf(f"{ck}: {fmt(cv)}", lang, use_ar_font), styles['Normal']))
+                    flow.append(Paragraph(reshape_for_pdf(f"{ck}: {fmt(cv)}") if lang=='ar' else f"{ck}: {fmt(cv)}", styles['Normal']))
         if risk_scores and fname in risk_scores:
-            flow.append(Spacer(1,6)); flow.append(Paragraph(cell_text_for_pdf(f"Contextualized risk (prelim.): {risk_scores[fname]:.1f}%", lang, use_ar_font), styles['Normal']))
+            flow.append(Spacer(1,6)); flow.append(Paragraph(reshape_for_pdf(f"Contextualized risk (prelim.): {risk_scores[fname]:.1f}%") if lang=='ar' else f"Contextualized risk (prelim.): {risk_scores[fname]:.1f}%", styles['Normal']))
         if band_pngs and fname in band_pngs:
             flow.append(RLImage(io.BytesIO(band_pngs[fname]), width=400, height=140)); flow.append(Spacer(1,6))
         if conn_images and fname in conn_images and not results['EEG_files'][fname].get('connectivity',{}).get('error'):
             flow.append(RLImage(io.BytesIO(conn_images[fname]), width=400, height=200)); flow.append(Spacer(1,6))
         flow.append(Spacer(1,10))
-    flow.append(Paragraph(cell_text_for_pdf('Automated interpretation (heuristic):', lang, use_ar_font), styles['Heading2']))
+    flow.append(Paragraph(reshape_for_pdf('Automated interpretation (heuristic):') if lang=='ar' else 'Automated interpretation (heuristic):', styles['Heading2']))
     if interpretations:
         for line in interpretations:
-            flow.append(Paragraph(cell_text_for_pdf(line, lang, use_ar_font), styles['Normal']))
+            flow.append(Paragraph(reshape_for_pdf(line) if lang=='ar' else line, styles['Normal']))
     else:
-        flow.append(Paragraph(cell_text_for_pdf('No heuristic interpretations.', lang, use_ar_font), styles['Normal']))
+        flow.append(Paragraph(reshape_for_pdf('No heuristic interpretations.') if lang=='ar' else 'No heuristic interpretations.', styles['Normal']))
     flow.append(Spacer(1,12))
-    flow.append(Paragraph(cell_text_for_pdf('Structured recommendations (for clinician):', lang, use_ar_font), styles['Heading2']))
+    flow.append(Paragraph(reshape_for_pdf('Structured recommendations (for clinician):') if lang=='ar' else 'Structured recommendations (for clinician):', styles['Heading2']))
     recs = [
         'Correlate QEEG/connectivity findings with PHQ-9 and AD8 and clinical interview.',
         'If PHQ-9 suggests moderate/severe depression or left frontal alpha asymmetry found, consider psychiatric referral and treatment planning (psychotherapy ± pharmacotherapy).',
@@ -509,53 +499,73 @@ def build_pdf(results: Dict, patient_info: Dict, lab_results: Dict, meds: List[s
         'If suicidal ideation present (PHQ-9 item), arrange urgent psychiatric evaluation.'
     ]
     for r in recs:
-        flow.append(Paragraph(cell_text_for_pdf(r, lang, use_ar_font), styles['Normal']))
+        flow.append(Paragraph(reshape_for_pdf(r) if lang=='ar' else r, styles['Normal']))
     flow.append(Spacer(1,12))
-    flow.append(Paragraph(cell_text_for_pdf(TEXTS['en']['note'], lang, use_ar_font), styles['Italic']))
+    flow.append(Paragraph(reshape_for_pdf(TEXTS['en']['note']) if lang=='ar' else TEXTS['en']['note'], styles['Italic']))
     doc.build(flow)
     buf.seek(0)
     return buf.getvalue()
 
 # ---------------- Streamlit UI ----------------
 st.set_page_config(page_title='NeuroEarly Pro — Clinical', layout='wide')
-st.write('✅ App started — loading UI...')
 
-st.sidebar.title('🌐 Language / اللغة')
-lang = st.sidebar.radio('Choose / اختر', ['en', 'ar'])
+# Inject CSS: set Amiri font and RTL for Arabic blocks (UI)
+amiri_css = ""
+if os.path.exists(AMIRI_PATH):
+    # use the app-level CSS to reference the font
+    amiri_css = f"""
+    <style>
+    @font-face {{
+      font-family: 'AmiriCustom';
+      src: url('/{AMIRI_PATH}') format('truetype');
+    }}
+    .app-title-ar, .app-subtitle-ar, .ar-rtl {{
+      font-family: 'AmiriCustom', serif !important;
+      direction: rtl !important;
+      text-align: right !important;
+    }}
+    /* small adjustments for selectboxes and options */
+    .stSelectbox [role="listbox"] {{ direction: rtl !important; }}
+    </style>
+    """
+    st.markdown(amiri_css, unsafe_allow_html=True)
+
+# Sidebar language
+st.sidebar.title("🌐 Language / اللغة")
+lang = st.sidebar.radio("Choose / اختر", ["en", "ar"])
 t = TEXTS[lang]
 
-# Arabic readiness
-if lang == 'ar' and not arabic_pdf_ready():
-    st.sidebar.warning('Arabic PDF rendering requires: (1) Amiri-Regular.ttf in the app root, and (2) packages arabic-reshaper and python-bidi installed. PDF/UI will fallback to English if missing.')
+# Title & subtitle (apply CSS class for Arabic)
+if lang == 'ar' and os.path.exists(AMIRI_PATH):
+    st.markdown(f"<h1 class='app-title-ar'>{t['title']}</h1>", unsafe_allow_html=True)
+    st.markdown(f"<p class='app-subtitle-ar'>{t['subtitle']}</p>", unsafe_allow_html=True)
+else:
+    st.title(t['title'])
+    st.write(t['subtitle'])
 
-# Use L_ui for all UI strings; options also reshaped if Arabic
-st.title(L_ui(t['title'], lang))
-st.write(L_ui(t['subtitle'], lang))
-
-# Patient form
-with st.expander(L_ui('🔎 Optional: Patient information / معلومات المريض', lang)):
-    name = st.text_input(L_ui('Full name / الاسم الكامل', lang))
-    patient_id = st.text_input(L_ui('Patient ID / رقم المريض', lang))
+# patient form
+with st.expander("🔎 Optional: Patient information / معلومات المريض"):
+    name = st.text_input("Full name / الاسم الكامل")
+    patient_id = st.text_input("Patient ID / رقم المريض")
     if lang == 'en':
         gender = st.selectbox('Gender', ['', 'Male', 'Female', 'Other'])
     else:
-        gender = st.selectbox(L_ui('الجنس', lang), ['', L_ui('ذكر', lang), L_ui('أنثى', lang), L_ui('آخر', lang)])
+        gender = st.selectbox('الجنس', ['', 'ذكر', 'أنثى', 'آخر'])
     min_dob = date(1920, 1, 1)
     max_dob = date.today()
-    dob = st.date_input(L_ui('Date of birth / تاريخ الميلاد', lang), value=None, min_value=min_dob, max_value=max_dob)
-    phone = st.text_input(L_ui('Phone / الهاتف', lang))
-    email = st.text_input(L_ui('Email / البريد الإلكتروني', lang))
-    history = st.text_area(L_ui('Relevant history (diabetes, HTN, family history...) / التاريخ الطبي', lang), height=80)
+    dob = st.date_input('Date of birth / تاريخ الميلاد', value=None, min_value=min_dob, max_value=max_dob)
+    phone = st.text_input('Phone / الهاتف')
+    email = st.text_input('Email / البريد الإلكتروني')
+    history = st.text_area('Relevant history (diabetes, HTN, family history...) / التاريخ الطبي', height=80)
 
 patient_info = {'name': name, 'id': patient_id, 'gender': gender, 'dob': dob.strftime('%Y-%m-%d') if dob else '', 'age': int((datetime.now().date()-dob).days/365) if dob else '', 'phone': phone, 'email': email, 'history': history}
 
-# Labs & meds
-with st.expander(L_ui('🧪 Optional: Recent lab tests / التحاليل', lang)):
-    lab_glucose = st.text_input(L_ui('Glucose', lang))
-    lab_b12 = st.text_input(L_ui('Vitamin B12', lang))
-    lab_vitd = st.text_input(L_ui('Vitamin D', lang))
-    lab_tsh = st.text_input(L_ui('TSH', lang))
-    lab_crp = st.text_input(L_ui('CRP', lang))
+with st.expander("🧪 Optional: Recent lab tests / التحاليل"):
+    lab_glucose = st.text_input('Glucose')
+    lab_b12 = st.text_input('Vitamin B12')
+    lab_vitd = st.text_input('Vitamin D')
+    lab_tsh = st.text_input('TSH')
+    lab_crp = st.text_input('CRP')
 lab_results = {}
 if lab_glucose: lab_results['Glucose'] = lab_glucose
 if lab_b12: lab_results['Vitamin B12'] = lab_b12
@@ -563,12 +573,12 @@ if lab_vitd: lab_results['Vitamin D'] = lab_vitd
 if lab_tsh: lab_results['TSH'] = lab_tsh
 if lab_crp: lab_results['CRP'] = lab_crp
 
-with st.expander(L_ui('💊 Current medications (one per line) / الأدوية الحالية', lang)):
-    meds_text = st.text_area(L_ui('List medications / اكتب الأدوية', lang), height=120)
+with st.expander("💊 Current medications (one per line) / الأدوية الحالية"):
+    meds_text = st.text_area('List medications / اكتب الأدوية', height=120)
 meds_list = [m.strip() for m in meds_text.splitlines() if m.strip()]
 
 # Tabs
-tab_upload, tab_phq, tab_ad8, tab_report = st.tabs([L_ui(t['upload'], lang), L_ui(t['phq9'], lang), L_ui(t['ad8'], lang), L_ui(t['report'], lang)])
+tab_upload, tab_phq, tab_ad8, tab_report = st.tabs([t['upload'], t['phq9'], t['ad8'], t['report']])
 
 EEG_results = {'EEG_files': {}}
 band_pngs = {}
@@ -576,19 +586,19 @@ conn_imgs = {}
 
 # Upload tab
 with tab_upload:
-    st.header(L_ui(t['upload'], lang))
-    uploaded_files = st.file_uploader(L_ui('EDF files / ملفات EDF', lang), type=['edf'], accept_multiple_files=True)
-    apply_ica = st.checkbox(L_ui(t['clean'], lang))
-    compute_conn = st.checkbox(L_ui(t['compute_connectivity'], lang))
-    conn_method = st.selectbox(L_ui('Connectivity method / طريقة الاتصالات', lang), ['coh','pli','wpli'])
-    notch_choice = st.multiselect(L_ui('Notch frequencies (Hz) / ترددات Notch', lang), [50,60,100,120], default=[50,100])
-    epoch_len = st.slider(L_ui('Epoch length for connectivity (s)', lang), 1.0, 5.0, 2.0, step=0.5)
-    downsample = st.selectbox(L_ui('Downsample to (Hz) — optional', lang), [None, 256, 200, 128], index=0)
+    st.header(t['upload'])
+    uploaded_files = st.file_uploader("EDF files / ملفات EDF", type=['edf'], accept_multiple_files=True)
+    apply_ica = st.checkbox(t['clean'])
+    compute_conn = st.checkbox(t['compute_connectivity'])
+    conn_method = st.selectbox("Connectivity method / طريقة الاتصالات", ['coh','pli','wpli'])
+    notch_choice = st.multiselect("Notch frequencies (Hz) / ترددات Notch", [50,60,100,120], default=[50,100])
+    epoch_len = st.slider("Epoch length for connectivity (s)", 1.0, 5.0, 2.0, step=0.5)
+    downsample = st.selectbox("Downsample to (Hz) — optional", [None, 256, 200, 128], index=0)
 
     if uploaded_files:
         os.makedirs(ARCHIVE_DIR, exist_ok=True)
         for f in uploaded_files:
-            st.info(L_ui(f'Processing {f.name} ...', lang))
+            st.info(f'Processing {f.name} ...')
             try:
                 with tempfile.NamedTemporaryFile(delete=False, suffix='.edf') as tmp:
                     tmp.write(f.read()); tmp.flush(); tmp_name = tmp.name
@@ -608,22 +618,22 @@ with tab_upload:
                             ica.fit(raw)
                             raw = ica.apply(raw)
                         except Exception as e:
-                            st.warning(L_ui(f'ICA failed/skipped: {e}', lang))
+                            st.warning(f'ICA failed/skipped: {e}')
                     else:
-                        st.warning(L_ui('scikit-learn not installed — ICA skipped.', lang))
+                        st.warning('scikit-learn not installed — ICA skipped.')
                 qeeg, bp = compute_qeeg_features_safe(raw)
                 conn_res = {}
                 if compute_conn:
-                    with st.spinner(L_ui('Computing connectivity (may be slow)...', lang)):
+                    with st.spinner('Computing connectivity (may be slow)...'):
                         conn_res = compute_connectivity_final_safe(raw, method=conn_method, fmin=4.0, fmax=30.0, epoch_len=epoch_len, picks=None, mode='fourier', n_jobs=1)
                         if conn_res.get('error'):
-                            st.warning(L_ui(f"Connectivity not available: {conn_res.get('error')}", lang))
+                            st.warning(f"Connectivity not available: {conn_res.get('error')}")
                         else:
                             try:
                                 img = plot_connectivity_heatmap(conn_res['matrix'], conn_res['channels'])
                                 conn_imgs[f.name] = img
                             except Exception as e:
-                                st.warning(L_ui(f'Connectivity heatmap failed: {e}', lang))
+                                st.warning(f'Connectivity heatmap failed: {e}')
                 EEG_results['EEG_files'][f.name] = {'bands': bp['abs_mean'], 'relative': bp['rel_mean'], 'QEEG': qeeg, 'connectivity': conn_res}
                 band_png = plot_band_bar(bp['abs_mean'])
                 band_pngs[f.name] = band_png
@@ -636,32 +646,33 @@ with tab_upload:
                         dst.write(src.read())
                 except Exception:
                     pass
-                st.success(L_ui(f'{f.name} processed.', lang))
+                st.success(f'{f.name} processed.')
             except Exception as e:
-                st.error(L_ui(f'Error processing {f.name}: {e}', lang))
+                st.error(f'Error processing {f.name}: {e}')
 
 # PHQ-9 tab
 with tab_phq:
-    st.header(L_ui(t['phq9'], lang))
+    st.header(t['phq9'])
     phq_qs = TEXTS[lang]['phq9_questions']
     phq_opts = TEXTS[lang]['phq9_options']
     phq_answers = []
+    # prepare UI options: show localized option labels
+    ui_opts = phq_opts[:]  # English by default; if Arabic selected these are Arabic strings from TEXTS
     for i,q in enumerate(phq_qs,1):
-        # ensure both question and options are shaped for Arabic UI
-        opts = [L_ui(opt, lang) for opt in phq_opts]
-        label = L_ui(q, lang)
-        ans = st.selectbox(label, opts, key=f'phq{i}')
-        # parse numeric prefix if exists
+        label = q
+        # show the localized option list
+        ans = st.selectbox(label, ui_opts, key=f'phq{i}')
+        # map selection to numeric value by index of ui_opts
         try:
-            phq_answers.append(int(ans.split('=')[0].strip()))
+            idx = ui_opts.index(ans)
+            num = int(phq_opts[idx].split('=')[0].strip())
         except Exception:
-            # fallback: map by index of option in original list
-            # find index of ans in opts (UI-version) and map to original numeric
+            # fallback: try to split (if '0 = ...') or 0
             try:
-                idx = opts.index(ans)
-                phq_answers.append(int(phq_opts[idx].split('=')[0].strip()))
+                num = int(ans.split('=')[0].strip())
             except Exception:
-                phq_answers.append(0)
+                num = 0
+        phq_answers.append(num)
     phq_score = sum(phq_answers)
     if phq_score < 5:
         phq_risk = 'Minimal'
@@ -673,31 +684,32 @@ with tab_phq:
         phq_risk = 'Moderately severe'
     else:
         phq_risk = 'Severe'
-    st.write(L_ui(f'PHQ-9 Score: **{phq_score}** → {phq_risk}', lang))
+    st.write(f'PHQ-9 Score: **{phq_score}** → {phq_risk}')
 
 # AD8 tab
 with tab_ad8:
-    st.header(L_ui(t['ad8'], lang))
+    st.header(t['ad8'])
     ad8_qs = TEXTS[lang]['ad8_questions']
     ad8_opts = TEXTS[lang]['ad8_options']
     ad8_answers = []
+    ui_ad8_opts = ad8_opts[:]
     for i,q in enumerate(ad8_qs,1):
-        opts = [L_ui(opt, lang) for opt in ad8_opts]
-        label = L_ui(q, lang)
-        ans = st.selectbox(label, opts, key=f'ad8{i}')
+        label = q
+        ans = st.selectbox(label, ui_ad8_opts, key=f'ad8{i}')
         try:
-            idx = opts.index(ans)
-            ad8_answers.append(1 if ad8_opts[idx] == ad8_opts[1] else 0)
+            idx = ui_ad8_opts.index(ans)
+            val = 1 if ad8_opts[idx] == ad8_opts[1] else 0
         except Exception:
-            ad8_answers.append(0)
+            val = 0
+        ad8_answers.append(val)
     ad8_score = sum(ad8_answers)
     ad8_risk = 'Low' if ad8_score < 2 else 'Possible concern'
-    st.write(L_ui(f'AD8 Score: **{ad8_score}** → {ad8_risk}', lang))
+    st.write(f'AD8 Score: **{ad8_score}** → {ad8_risk}')
 
 # Report tab
 with tab_report:
-    st.header(L_ui(t['report'], lang))
-    if st.button(L_ui('Generate', lang)):
+    st.header(t['report'])
+    if st.button('Generate'):
         EEG_results['timestamp'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         EEG_results['Depression'] = {'score': phq_score, 'risk': phq_risk}
         EEG_results['Alzheimer'] = {'score': ad8_score, 'risk': ad8_risk}
@@ -726,9 +738,9 @@ with tab_report:
         # JSON
         try:
             json_bytes = io.BytesIO(json.dumps(EEG_results, indent=2, ensure_ascii=False, default=make_serializable).encode())
-            st.download_button(L_ui(TEXTS[lang]['download_json'], lang), json_bytes, file_name='report.json')
+            st.download_button(TEXTS[lang]['download_json'], json_bytes, file_name='report.json')
         except Exception as e:
-            st.warning(L_ui(f'JSON export failed: {e}', lang))
+            st.warning(f'JSON export failed: {e}')
         # CSV
         try:
             if EEG_results['EEG_files']:
@@ -739,24 +751,23 @@ with tab_report:
                     row['risk_score'] = risk_scores.get(fname, '')
                     rows.append(row)
                 df = pd.DataFrame(rows)
-                st.download_button(L_ui(TEXTS[lang]['download_csv'], lang), df.to_csv(index=False).encode('utf-8'), file_name='qeeg_features.csv', mime='text/csv')
+                st.download_button(TEXTS[lang]['download_csv'], df.to_csv(index=False).encode('utf-8'), file_name='qeeg_features.csv', mime='text/csv')
         except Exception as e:
-            st.warning(L_ui(f'CSV export failed: {e}', lang))
+            st.warning(f'CSV export failed: {e}')
         # PDF
         try:
             pdfb = build_pdf(EEG_results, patient_info, lab_results, meds_list, lang=lang, band_pngs=band_pngs, conn_images=conn_imgs, interpretations=interpretations, risk_scores=risk_scores)
-            st.download_button(L_ui(TEXTS[lang]['download_pdf'], lang), pdfb, file_name='report.pdf')
-            st.success(L_ui('Report generated — downloads ready.', lang))
+            st.download_button(TEXTS[lang]['download_pdf'], pdfb, file_name='report.pdf')
+            st.success('Report generated — downloads ready.')
         except Exception as e:
-            st.error(L_ui(f'PDF generation failed: {e}', lang))
+            st.error(f'PDF generation failed: {e}')
     st.markdown('---')
-    st.info(L_ui(TEXTS[lang]['note'], lang))
+    st.info(TEXTS[lang]['note'])
 
-# Installation notes
-with st.expander(L_ui('Installation & Notes / ملاحظات التثبيت', lang)):
-    st.write('Create a requirements.txt with these packages:')
-    st.code("""
-streamlit
+# Installation note (helpful)
+with st.expander('Installation & Notes'):
+    st.write('requirements example:')
+    st.code("""streamlit
 numpy
 pandas
 matplotlib
@@ -767,6 +778,6 @@ arabic-reshaper
 python-bidi
 scipy
 """)
-    st.write(L_ui('If compute_connectivity is slow: avoid enabling it on very long recordings. ICA requires scikit-learn. ML model is preliminary and trained on synthetic data — calibrate with local labeled data before clinical use.', lang))
+    st.write('For Arabic PDF shaping install arabic-reshaper and python-bidi and ensure Amiri-Regular.ttf in root.')
 
 # EOF
