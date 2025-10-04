@@ -1,10 +1,12 @@
 streamlit
-mne
 numpy
 pandas
 matplotlib
+mne
+scikit-learn
 reportlab
 arabic-reshaper
 python-bidi
-scikit-learn
 scipy
+shap
+joblib
