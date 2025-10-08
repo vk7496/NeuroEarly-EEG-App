@@ -1,35 +1,28 @@
-# app_cloud_safe_XAI.py
+# app_neuroearly_final.py
 """
-NeuroEarly Pro — Cloud-safe, feature-rich Streamlit app
-Features:
-- EDF upload (pyedflib fallback if mne missing)
-- Preprocessing: bandpass, notch, simple artifact removal (eye-blink/muscle via ICA if mne present)
-- PSD / band-power features, ratios, frontal alpha asymmetry
-- Connectivity (if mne_connectivity available) optional
-- Microstate basic analysis (GFP peaks + kmeans) approximate (fallback if scikit-learn available)
-- Model hooks for Depression and Alzheimer (load model_depression.pkl, model_alzheimer.pkl)
-- XAI with SHAP (if available), fallback to precomputed shap_values.json
-- PHQ-9 (corrected) and AD8 UI
-- Bilingual PDF generator (English/Arabic). For Arabic RTL quality, reportlab + arabic_reshaper + python-bidi recommended.
-- Branding footer: Golden Bird LLC
+NeuroEarly Pro — Final (Cloud-aware, bilingual EN/AR, Amiri RTL PDF)
+Place models (model_depression.pkl, model_alzheimer.pkl) and optionally
+Amiri-Regular.ttf in app root.
 """
 import streamlit as st
 st.set_page_config(page_title="NeuroEarly Pro — Clinical XAI", layout="wide")
 
+# core imports
 import os, io, json, tempfile, traceback
 from datetime import datetime
 from pathlib import Path
 import numpy as np
 import pandas as pd
 
-# Try imports with graceful fallback
+# ---------- Safe optional imports ----------
 HAS_MNE = False
 HAS_PYEDF = False
 HAS_CONN = False
 HAS_SHAP = False
 HAS_SKLEARN = False
 HAS_REPORTLAB = False
-HAS_ARABIC = False
+HAS_ARABIC_TOOLS = False
+HAS_XGBOOST = False
 
 try:
     import mne
@@ -62,31 +55,45 @@ try:
 except Exception:
     HAS_SKLEARN = False
 
-# Optional for high-quality PDFs with Arabic support
+try:
+    import joblib
+except Exception:
+    joblib = None
+
+# ReportLab + Arabic shaping
 try:
     from reportlab.pdfgen import canvas
     from reportlab.lib.pagesizes import A4
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
     HAS_REPORTLAB = True
     import arabic_reshaper
     from bidi.algorithm import get_display
-    HAS_ARABIC = True
+    HAS_ARABIC_TOOLS = True
 except Exception:
     HAS_REPORTLAB = False
-    HAS_ARABIC = False
+    HAS_ARABIC_TOOLS = False
+
+# XGBoost optional detection
+try:
+    import xgboost
+    HAS_XGBOOST = True
+except Exception:
+    HAS_XGBOOST = False
 
 from scipy.signal import welch, butter, filtfilt, iirnotch
 
-# ----------------- Helpers -----------------
+# ---------- Helpers ----------
 def now_ts():
     return datetime.utcnow().strftime("%Y%m%d_%H%M%S")
 
 def log_exc(e):
     tb = traceback.format_exc()
-    st.error("Internal error — see console/logs.")
+    st.error("Internal error — see logs.")
     st.code(tb)
     print(tb)
 
-# ---------- EDF loader (mne or pyedflib) ----------
+# ---------- EDF loader (mne or pyedflib fallback) ----------
 def save_uploaded_tmp(uploaded_file):
     with tempfile.NamedTemporaryFile(suffix=".edf", delete=False) as tmp:
         tmp.write(uploaded_file.getbuffer())
@@ -95,18 +102,14 @@ def save_uploaded_tmp(uploaded_file):
 
 def read_edf(path):
     """
-    Returns: dict with keys:
-      backend: 'mne' or 'pyedflib'
-      data: np.array (n_channels, n_samples)
-      ch_names: list
-      sfreq: float
+    Returns dict: backend, data (n_chan,n_samples) or raw if mne
     """
     if HAS_MNE:
         raw = mne.io.read_raw_edf(path, preload=True, verbose=False)
-        data = raw.get_data()  # shape (n_channels, n_times)
+        data = raw.get_data()
         chs = raw.ch_names
         sf = raw.info.get("sfreq", None)
-        return {"backend":"mne", "raw": raw, "data": data, "ch_names": chs, "sfreq": sf}
+        return {"backend":"mne", "raw":raw, "data":data, "ch_names":chs, "sfreq":sf}
     elif HAS_PYEDF:
         f = pyedflib.EdfReader(path)
         n = f.signals_in_file
@@ -114,78 +117,73 @@ def read_edf(path):
         sf = f.getSampleFrequency(0) if f.getSampleFrequency(0) else None
         sigs = [f.readSignal(i).astype(np.float64) for i in range(n)]
         f._close()
-        data = np.vstack(sigs)  # (n_channels, n_samples)
-        return {"backend":"pyedflib", "data": data, "ch_names": chs, "sfreq": sf}
+        data = np.vstack(sigs)
+        return {"backend":"pyedflib", "data":data, "ch_names":chs, "sfreq":sf}
     else:
         raise ImportError("No EDF backend available. Install mne or pyedflib.")
 
 # ---------- Preprocessing ----------
 def notch_filter(sig, sfreq, freq=50.0, Q=30.0):
-    if sfreq is None or sfreq <= 0:
+    if sfreq is None or sfreq<=0:
         return sig
-    b, a = iirnotch(freq, Q, sfreq)
-    return filtfilt(b, a, sig)
+    b,a = iirnotch(freq, Q, sfreq)
+    try:
+        return filtfilt(b,a,sig)
+    except Exception:
+        return sig
 
 def bandpass_filter(sig, sfreq, l=0.5, h=45.0, order=4):
-    if sfreq is None or sfreq <= 0:
+    if sfreq is None or sfreq<=0:
         return sig
-    nyq = 0.5 * sfreq
-    low = l / nyq
-    high = h / nyq
-    b, a = butter(order, [low, high], btype='band')
-    return filtfilt(b, a, sig)
+    nyq = 0.5*sfreq
+    low = max(l/nyq, 1e-6)
+    high = min(h/nyq, 0.999)
+    b,a = butter(order, [low, high], btype='band')
+    try:
+        return filtfilt(b,a,sig)
+    except Exception:
+        return sig
 
-def preprocess_data(edf_dict, apply_notch=True, l=0.5, h=45.0):
+def preprocess_data(edf_dict, notch_freq=50.0, l=0.5, h=45.0):
     data = edf_dict["data"].astype(np.float64)
     sf = edf_dict.get("sfreq") or 256.0
     pre = np.zeros_like(data)
     for i in range(data.shape[0]):
         x = data[i]
-        if apply_notch:
-            x = notch_filter(x, sf, freq=50.0)
+        x = notch_filter(x, sf, freq=notch_freq)
         x = bandpass_filter(x, sf, l=l, h=h)
         pre[i] = x
     return pre, sf
 
-# ---------- Artifact removal (ICA if mne available) ----------
+# ---------- ICA artifact removal if possible ----------
 def run_ica_if_possible(edf_dict, n_components=15):
-    """
-    If mne is available, run ICA and return cleaned raw (numpy array).
-    Otherwise, return original data and note that ICA not run.
-    """
-    if not HAS_MNE or edf_dict.get("backend")!='mne':
+    if not HAS_MNE or edf_dict.get("backend")!="mne":
         return edf_dict["data"], {"ica_status":"not_available"}
     try:
         raw = edf_dict["raw"]
         picks = mne.pick_types(raw.info, eeg=True, exclude='bads')
         ica = mne.preprocessing.ICA(n_components=n_components, random_state=97, verbose=False)
         ica.fit(raw, picks=picks, verbose=False)
-        # automatic detection optional — here we skip automatic remove to be conservative
-        raw_clean = raw.copy()
-        # do not apply removals automatically; return fitted info
-        return raw_clean.get_data(), {"ica_status":"fitted", "n_components": ica.n_components_}
+        # conservative: do not auto exclude; return fitted info and data (no change)
+        return raw.get_data(), {"ica_status":"fitted", "n_components": ica.n_components_}
     except Exception as e:
-        return edf_dict["data"], {"ica_status": f"failed: {str(e)}"}
+        return edf_dict["data"], {"ica_status":f"failed:{str(e)}"}
 
-# ---------- PSD & features ----------
-def compute_psd_band(df_data, sfreq, picks=None, nperseg=1024):
-    """
-    df_data: np.array (n_channels, n_samples)
-    returns: df_bands: DataFrame rows per channel with abs/rel for delta/theta/alpha/beta/gamma
-    """
+# ---------- PSD & feature extraction ----------
+def compute_psd_band(data, sfreq, picks=None, nperseg=1024):
     bands = {"delta":(0.5,4),"theta":(4,8),"alpha":(8,13),"beta":(13,30),"gamma":(30,45)}
-    nchan = df_data.shape[0]
+    nchan = data.shape[0]
     idxs = picks if picks is not None else list(range(nchan))
     rows = []
     for i in idxs:
-        sig = df_data[i]
+        sig = data[i]
         try:
-            freqs, pxx = welch(sig, fs=sfreq, nperseg=min(nperseg, max(256, len(sig))), detrend='constant')
+            freqs, pxx = welch(sig, fs=sfreq, nperseg=min(nperseg, max(256,len(sig))))
         except Exception:
             freqs = np.array([])
             pxx = np.array([])
-        total = float(np.trapz(pxx, freqs)) if freqs.size>0 else 0.0
-        row = {"channel": i}
+        total = float(np.trapz(pxx,freqs)) if freqs.size>0 else 0.0
+        row = {"channel_idx": i}
         for k,(lo,hi) in bands.items():
             if freqs.size==0:
                 abs_p = 0.0
@@ -196,8 +194,7 @@ def compute_psd_band(df_data, sfreq, picks=None, nperseg=1024):
             row[f"{k}_abs"] = abs_p
             row[f"{k}_rel"] = rel_p
         rows.append(row)
-    df = pd.DataFrame(rows)
-    return df
+    return pd.DataFrame(rows)
 
 def aggregate_features(df_bands, ch_names=None):
     agg = {}
@@ -208,9 +205,8 @@ def aggregate_features(df_bands, ch_names=None):
     agg['theta_rel_mean'] = float(df_bands['theta_rel'].mean())
     agg['delta_rel_mean'] = float(df_bands['delta_rel'].mean())
     agg['theta_beta_ratio'] = float((df_bands['theta_rel'].mean()) / (df_bands['beta_rel'].mean() + 1e-9))
-    # frontal alpha asymmetry example if ch_names provided (best-effort)
+    # frontal alpha asymmetry (best-effort indices)
     if ch_names and len(ch_names)>=4:
-        # try find F3,F4 or Fp1,Fp2 names heuristically
         try:
             names = [n.upper() for n in ch_names]
             def idx_of(pos):
@@ -218,193 +214,228 @@ def aggregate_features(df_bands, ch_names=None):
                     if pos in n:
                         return i
                 return None
-            i_f3 = idx_of("F3")
-            i_f4 = idx_of("F4")
+            i_f3 = idx_of("F3"); i_f4 = idx_of("F4")
             if i_f3 is not None and i_f4 is not None:
-                # use relative alpha per channel
-                val_f3 = df_bands.loc[df_bands['channel']==i_f3, 'alpha_rel'].values
-                val_f4 = df_bands.loc[df_bands['channel']==i_f4, 'alpha_rel'].values
+                val_f3 = df_bands.loc[df_bands['channel_idx']==i_f3,'alpha_rel'].values
+                val_f4 = df_bands.loc[df_bands['channel_idx']==i_f4,'alpha_rel'].values
                 if val_f3.size>0 and val_f4.size>0:
-                    agg['alpha_asym_F3_F4'] = float(val_f3[0] - val_f4[0])
+                    agg['alpha_asym_F3_F4'] = float(val_f3[0]-val_f4[0])
         except Exception:
             pass
     return agg
 
-# ---------- Connectivity (optional) ----------
-def compute_connectivity(raw, sfreq, fmin=8, fmax=13):
-    if not HAS_CONN or not HAS_MNE:
-        raise ImportError("Connectivity backend not available")
+# ---------- Connectivity (if available) ----------
+def compute_connectivity_if_available(raw, sfreq, method="pli", fmin=8, fmax=13):
+    if not (HAS_CONN and HAS_MNE):
+        raise ImportError("mne_connectivity not available")
     try:
-        # expect raw is mne Raw object
         from mne_connectivity import spectral_connectivity
-        # construct epochs of 1s
         events = mne.make_fixed_length_events(raw, duration=1.0)
         epochs = mne.Epochs(raw, events=events, tmin=0.0, tmax=1.0-1.0/raw.info['sfreq'], baseline=None, preload=True, verbose=False)
-        con, freqs, times, n_epochs, n_tapers = spectral_connectivity(epochs, method="pli", sfreq=sfreq, fmin=fmin, fmax=fmax, faverage=True, verbose=False)
+        con, freqs, times, n_epochs, n_tapers = spectral_connectivity(epochs, method=method, sfreq=sfreq, fmin=fmin, fmax=fmax, faverage=True, verbose=False)
         return {"shape": con.shape, "freqs": list(freqs)}
     except Exception as e:
         raise
 
-# ---------- Microstate (simple) ----------
+# ---------- Microstate (if sklearn available) ----------
 def microstate_analysis(data, sfreq, n_states=4):
-    """
-    Simple microstate: compute GFP peaks and run kmeans on template maps.
-    data: (n_channels, n_samples)
-    returns: dict with microstate maps mean (if sklearn available)
-    """
     if not HAS_SKLEARN:
         return {"status":"sklearn_not_available"}
     try:
-        # compute GFP (global field power) -> std across channels at each timepoint
         gfp = data.std(axis=0)
-        # find peaks: simple threshold top percent
-        thr = np.percentile(gfp, 95)
-        peak_idx = np.where(gfp >= thr)[0]
-        if peak_idx.size == 0:
+        thr = np.percentile(gfp,95)
+        peak_idx = np.where(gfp>=thr)[0]
+        if peak_idx.size==0:
             return {"status":"no_peaks"}
-        # pick maps at peaks
-        maps = data[:, peak_idx].T  # shape (n_peaks, n_channels)
+        maps = data[:, peak_idx].T
         scaler = StandardScaler()
         maps_s = scaler.fit_transform(maps)
         kmeans = KMeans(n_clusters=n_states, random_state=42).fit(maps_s)
         centers = kmeans.cluster_centers_
-        return {"status":"ok", "n_peaks": int(peak_idx.size), "centers": centers.tolist()}
+        return {"status":"ok", "n_peaks":int(peak_idx.size), "centers": centers.tolist()}
     except Exception as e:
-        return {"status": f"failed: {str(e)}"}
+        return {"status":f"failed:{str(e)}"}
 
-# ---------- Models & SHAP loader ----------
+# ---------- Model & SHAP ----------
 def load_model(path):
     try:
-        import joblib
-        if os.path.exists(path):
+        if joblib and os.path.exists(path):
             return joblib.load(path)
     except Exception:
-        pass
+        return None
     return None
 
 def explain_with_shap(model, X_df):
     if not HAS_SHAP:
         return None
     try:
-        # If tree model, TreeExplainer; else generic
-        if hasattr(model, "get_booster") or model.__class__.__name__.lower().startswith("xgboost"):
+        if HAS_XGBOOST and model.__class__.__name__.lower().startswith("xgb"):
             expl = shap.TreeExplainer(model)
-            sv = expl.shap_values(X_df)
-            return sv
+            vals = expl.shap_values(X_df)
+            return vals
         else:
             expl = shap.Explainer(model.predict, X_df)
-            sv = expl(X_df)
-            return sv
+            vals = expl(X_df)
+            return vals
     except Exception as e:
         print("SHAP failed:", e)
         return None
 
-# ---------- PDF generator (reportlab if present) ----------
-def generate_pdf_report(full_summary, lang='en', shap_local=None):
+# ---------- PDF generation (reportlab + Amiri support) ----------
+def register_amiri_font(ttf_path=None):
     """
-    Returns bytes of PDF.
-    If reportlab+arabic available -> nicer; otherwise fallback to fpdf-like simple text using reportlab basic anyway.
+    Try to register Amiri font from provided path or ./Amiri-Regular.ttf or system fonts.
     """
-    if HAS_REPORTLAB:
-        from reportlab.lib.pagesizes import A4
-        from reportlab.pdfgen import canvas
-        from reportlab.lib.units import mm
-        buffer = io.BytesIO()
-        c = canvas.Canvas(buffer, pagesize=A4)
-        width, height = A4
-        margin = 20*mm
-        x = margin
-        y = height - margin
-        # Header
-        if lang=='en':
-            c.setFont("Helvetica-Bold", 16)
-            c.drawCentredString(width/2, y, "NeuroEarly Pro — Clinical Report")
-            y -= 12*mm
-            c.setFont("Helvetica", 10)
-            c.drawString(x, y, f"Generated: {now_ts()}")
-            y -= 6*mm
-            p = full_summary.get("patient", {})
-            c.drawString(x, y, f"Patient: {p.get('name','-')}   ID: {p.get('id','-')}   DOB: {p.get('dob','-')}")
-            y -= 8*mm
-        else:
-            # Arabic (reshaper + bidi)
-            c.setFont("Helvetica-Bold", 16)
-            header = "تقرير NeuroEarly Pro — سريري"
-            if HAS_ARABIC:
-                header = get_display(arabic_reshaper.reshape(header))
-            c.drawCentredString(width/2, y, header)
-            y -= 12*mm
-            p = full_summary.get("patient", {})
-            lines = [
-                f"التاريخ: {now_ts()}",
-                f"المريض: {p.get('name','-')}  المعرف: {p.get('id','-')}  الميلاد: {p.get('dob','-')}"
-            ]
-            for ln in lines:
-                out = get_display(arabic_reshaper.reshape(ln)) if HAS_ARABIC else ln
-                c.drawString(x, y, out)
-                y -= 6*mm
-        y -= 4*mm
-        # EEG files summary
-        c.setFont("Helvetica-Bold", 12)
-        c.drawString(x, y, "EEG / QEEG Summary:")
-        y -= 8*mm
-        c.setFont("Helvetica", 10)
-        for f in full_summary.get("files", []):
-            txt = f"File: {f.get('filename')} | Channels: {f.get('raw_summary',{}).get('n_channels','-')} | sfreq: {f.get('raw_summary',{}).get('sfreq','-')}"
-            c.drawString(x, y, txt)
-            y -= 6*mm
-            # band features short
-            if f.get("agg_features"):
-                s = f"Alpha mean (rel): {f['agg_features'].get('alpha_rel_mean',0):.4f} | Theta mean: {f['agg_features'].get('theta_rel_mean',0):.4f}"
-                c.drawString(x+6*mm, y, s)
-                y -= 6*mm
-        y -= 4*mm
-        # Model predictions
-        c.setFont("Helvetica-Bold", 12)
-        c.drawString(x, y, "Model Predictions / النتائج:")
-        y -= 8*mm
-        preds = full_summary.get("predictions", {})
-        if preds:
-            for key, val in preds.items():
-                txt = f"{key}: {val}"
-                c.drawString(x, y, txt)
-                y -= 6*mm
-        # XAI local summary
-        if shap_local:
-            y -= 6*mm
-            c.setFont("Helvetica-Bold", 12)
-            c.drawString(x, y, "XAI (top contributors):")
-            y -= 8*mm
-            c.setFont("Helvetica", 10)
-            # shap_local assumed dict feature->value
-            for feat, v in shap_local.items():
-                c.drawString(x, y, f"{feat}: {v:.4f}")
-                y -= 6*mm
-                if y < 40*mm:
-                    c.showPage(); y = height - margin
-        # Footer branding
-        y = 20*mm
-        c.setFont("Helvetica", 8)
-        footer = "Designed and developed by Golden Bird LLC — Vista Kaviani  | Muscat, Sultanate of Oman"
-        if lang!='en' and HAS_ARABIC:
-            footer = get_display(arabic_reshaper.reshape("صمّم وطوّر من قبل شركة Golden Bird LLC — فيستا كاوياني  | مسقط، سلطنة عمان"))
-        c.drawCentredString(width/2, y, footer)
-        c.setFont("Helvetica-Bold", 8)
-        c.drawCentredString(width/2, y-6, "Research/demo only — Not a clinical diagnosis.")
-        c.save()
-        buffer.seek(0)
-        return buffer.read()
+    try:
+        if ttf_path and os.path.exists(ttf_path):
+            pdfmetrics.registerFont(TTFont("Amiri", ttf_path))
+            return "Amiri"
+        # try local
+        local = Path("./Amiri-Regular.ttf")
+        if local.exists():
+            pdfmetrics.registerFont(TTFont("Amiri", str(local)))
+            return "Amiri"
+        # try common system path (Linux)
+        sys_paths = ["/usr/share/fonts/truetype/amiri/Amiri-Regular.ttf", "/usr/share/fonts/truetype/Amiri-Regular.ttf"]
+        for p in sys_paths:
+            if Path(p).exists():
+                pdfmetrics.registerFont(TTFont("Amiri", p))
+                return "Amiri"
+    except Exception:
+        pass
+    # fallback to Helvetica
+    return "Helvetica"
+
+def reshape_ar(text):
+    if HAS_ARABIC_TOOLS:
+        try:
+            return get_display(arabic_reshaper.reshape(text))
+        except Exception:
+            return text
+    return text
+
+def generate_pdf_report(full_summary, lang='en', shap_local=None, amiri_path=None):
+    """
+    Returns bytes of PDF. If reportlab+arabic tools installed -> RTL Arabic with Amiri.
+    """
+    if not HAS_REPORTLAB:
+        # fallback: return JSON bytes
+        return json.dumps(full_summary, indent=2, ensure_ascii=False).encode('utf-8')
+    # register Amiri or fallback
+    font_name = register_amiri_font(amiri_path)
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+    margin = 40
+    x = margin
+    y = height - margin
+    # header
+    title_en = "NeuroEarly Pro — Clinical Report"
+    title_ar = "تقرير NeuroEarly Pro — سريري"
+    if lang=='en':
+        c.setFont(font_name, 16)
+        c.drawCentredString(width/2, y, title_en)
+        y -= 24
+        met = f"Generated: {now_ts()}"
+        c.setFont(font_name, 9)
+        c.drawString(x, y, met); y -= 14
+        p = full_summary.get("patient",{})
+        c.drawString(x, y, f"Patient: {p.get('name','-')}  ID: {p.get('id','-')}  DOB: {p.get('dob','-')}"); y -= 16
     else:
-        # Simple plain-text PDF fallback using reportlab basic if present or return text file bytes
-        txt = "NeuroEarly Pro — Report\n\n"
-        txt += json.dumps(full_summary, indent=2, ensure_ascii=False)
-        return txt.encode('utf-8')
+        c.setFont(font_name, 16)
+        header = reshape_ar(title_ar)
+        c.drawCentredString(width/2, y, header)
+        y -= 24
+        p = full_summary.get("patient",{})
+        lines = [
+            reshape_ar(f"التاريخ: {now_ts()}"),
+            reshape_ar(f"المريض: {p.get('name','-')}  المعرف: {p.get('id','-')}  الميلاد: {p.get('dob','-')}")
+        ]
+        c.setFont(font_name, 10)
+        for ln in lines:
+            c.drawRightString(width-margin, y, ln); y -= 14
+    y -= 6
+    # EEG summary
+    c.setFont(font_name, 12)
+    sec_en = "EEG / QEEG Summary"
+    sec_ar = reshape_ar("ملخص EEG / QEEG")
+    if lang=='en':
+        c.drawString(x, y, sec_en); y -= 14
+    else:
+        c.drawRightString(width-margin, y, sec_ar); y -= 14
+    c.setFont(font_name, 9)
+    for f in full_summary.get("files",[]):
+        txt_en = f"File: {f.get('filename')} | Channels: {f.get('raw_summary',{}).get('n_channels','-')} | sfreq: {f.get('raw_summary',{}).get('sfreq','-')}"
+        if lang=='en':
+            c.drawString(x+6, y, txt_en); y -= 12
+            af = f.get("agg_features",{})
+            c.drawString(x+12, y, f"Alpha mean (rel): {af.get('alpha_rel_mean',0):.4f}"); y -= 12
+        else:
+            ct = reshape_ar(f"الملف: {f.get('filename')}  القنوات: {f.get('raw_summary',{}).get('n_channels','-')}  التردد: {f.get('raw_summary',{}).get('sfreq','-')}")
+            c.drawRightString(width-margin, y, ct); y -= 12
+            af = f.get("agg_features",{})
+            s = reshape_ar(f"متوسط ألفا (نسبي): {af.get('alpha_rel_mean',0):.4f}")
+            c.drawRightString(width-margin, y, s); y -= 12
+    y -= 6
+    # Predictions
+    preds = full_summary.get("predictions",{})
+    if preds:
+        c.setFont(font_name, 11)
+        if lang=='en':
+            c.drawString(x, y, "Model predictions:"); y -= 12
+            for k,v in preds.items():
+                c.setFont(font_name, 9)
+                c.drawString(x+6, y, f"{k}: {v}"); y -= 10
+        else:
+            c.drawRightString(width-margin, y, reshape_ar("نتائج النموذج:")); y -= 12
+            for k,v in preds.items():
+                c.drawRightString(width-margin, y, reshape_ar(f"{k}: {v}")); y -= 10
+    y -= 8
+    # XAI (shap_local)
+    if shap_local:
+        c.setFont(font_name, 11)
+        if lang=='en':
+            c.drawString(x, y, "Explainable AI — top contributors:"); y -= 12
+            c.setFont(font_name, 9)
+            for feat,val in shap_local.items():
+                c.drawString(x+6, y, f"{feat}: {val:.4f}"); y -= 10
+        else:
+            c.drawRightString(width-margin, y, reshape_ar("الذكاء الاصطناعي القابل للتفسير — أعلى المؤثرين:")); y -= 12
+            for feat,val in shap_local.items():
+                ln = reshape_ar(f"{feat}: {val:.4f}")
+                c.drawRightString(width-margin, y, ln); y -= 10
+    # Footer branding
+    footer_en = "Designed and developed by Golden Bird LLC — Vista Kaviani | Muscat, Sultanate of Oman"
+    footer_ar = reshape_ar("صمّم وطوّر من قبل شركة Golden Bird LLC — فيستا كاوياني | مسقط، سلطنة عمان")
+    c.setFont(font_name, 8)
+    c.drawCentredString(width/2, 30, footer_en if lang=='en' else footer_ar)
+    c.setFont(font_name, 8)
+    disc = "Research/demo only — Not a clinical diagnosis."
+    c.drawCentredString(width/2, 18, reshape_ar(disc) if lang!='en' and HAS_ARABIC_TOOLS else disc)
+    c.save()
+    buffer.seek(0)
+    return buffer.read()
 
 # ---------- UI ----------
-st.title("NeuroEarly Pro — Clinical XAI (Cloud-Safe)")
-st.markdown("Upload EDF(s) → preprocess → features → model predictions + XAI → bilingual PDF report (EN / AR)")
+# Basic CSS for nicer look
+st.markdown("""
+<style>
+.main > .block-container { max-width: 1200px; }
+h1 { color: #1b3b5f; }
+.report-footer { color: #6b7280; font-size:12px; }
+</style>
+""", unsafe_allow_html=True)
 
-# Sidebar: language & patient basic
+# Header
+col1, col2 = st.columns([4,1])
+with col1:
+    st.title("🧠 NeuroEarly Pro — Clinical XAI")
+    st.markdown("EEG / QEEG / Connectivity / Microstates / Explainable AI — Research demo only")
+with col2:
+    # small logo placeholder
+    st.markdown("<div style='text-align:right; font-size:12px;'>Golden Bird LLC</div>", unsafe_allow_html=True)
+
+# Sidebar: language and patient
 with st.sidebar:
     st.header("Settings")
     lang = st.selectbox("Language / اللغة", options=["en","ar"], index=0)
@@ -414,12 +445,15 @@ with st.sidebar:
     patient_id = st.text_input("ID")
     dob = st.date_input("DOB")
     sex = st.selectbox("Sex / الجنس", ("Unknown","Male","Female","Other"))
+    st.markdown("---")
+    st.write("Model files (optional): place model_depression.pkl and model_alzheimer.pkl in app root.")
 
-st.markdown("### 1) Upload EDF file(s) (.edf)")
+# Upload EDF
+st.subheader("1) Upload EDF file(s) (.edf)")
 uploads = st.file_uploader("EDF files", type=["edf"], accept_multiple_files=True)
 
-# PHQ-9 (corrected) UI (0-3 each)
-st.markdown("### 2) Depression screening — PHQ-9")
+# PHQ-9 UI corrected
+st.subheader("2) Depression screening — PHQ-9")
 PHQ9_ITEMS = [
  "Little interest or pleasure in doing things",
  "Feeling down, depressed, or hopeless",
@@ -437,10 +471,10 @@ for i,item in enumerate(PHQ9_ITEMS, start=1):
     with cols[(i-1)%3]:
         phq[f"q{i}"] = st.radio(f"Q{i}", [0,1,2,3], index=0, key=f"phq{i}", horizontal=True)
 phq_total = sum(phq.values())
-st.info(f"PHQ-9 total: {phq_total} (0–4 minimal, 5–9 mild, 10–14 moderate, 15–19 mod-severe, 20–27 severe)")
+st.info(f"PHQ-9 total: {phq_total} (0–4 minimal, 5–9 mild, 10–14 moderate, 15–19 moderately severe, 20–27 severe)")
 
 # AD8
-st.markdown("### 3) Cognitive screening — AD8")
+st.subheader("3) Cognitive screening — AD8")
 AD8_ITEMS = [
  "Problems with judgment (e.g., problems making decisions, bad financial decisions)",
  "Less interest in hobbies/activities",
@@ -457,15 +491,15 @@ for i,item in enumerate(AD8_ITEMS, start=1):
 ad8_total = sum(ad8.values())
 st.info(f"AD8 total: {ad8_total} (score ≥2 suggests cognitive impairment)")
 
-# Options
+# options
 st.markdown("---")
 st.header("Processing options")
 use_ica = st.checkbox("Attempt ICA artifact removal (if mne available)", value=False)
-compute_conn = st.checkbox("Compute connectivity (if available)", value=False)
+compute_conn = st.checkbox("Compute connectivity (if mne_connectivity available)", value=False)
 compute_micro = st.checkbox("Microstate analysis (if sklearn available)", value=False)
 run_models = st.checkbox("Run classification models (if model files present)", value=True)
 
-# Process uploaded files
+# processing
 results = []
 if uploads:
     for up in uploads:
@@ -485,7 +519,7 @@ if uploads:
             conn_summary = None
             if compute_conn and HAS_CONN and HAS_MNE and edf.get("backend")=="mne":
                 try:
-                    conn_summary = compute_connectivity(edf["raw"], sf)
+                    conn_summary = compute_connectivity_if_available(edf["raw"], sf)
                     st.write("Connectivity summary:", conn_summary)
                 except Exception as e:
                     st.warning("Connectivity failed: " + str(e))
@@ -505,7 +539,7 @@ if uploads:
             st.error(f"Error processing file {up.name}: {e}")
             log_exc(e)
 
-# Combined summary & model
+# prepare summary
 full_summary = {
     "patient": {"name": patient_name, "id": patient_id, "dob": str(dob), "sex": sex},
     "phq9": {"total": phq_total, "items": phq},
@@ -514,30 +548,24 @@ full_summary = {
     "predictions": {}
 }
 
-# Load models if present
+# load models and run predictions
 if run_models and results:
     model_dep = load_model("model_depression.pkl")
     model_ad = load_model("model_alzheimer.pkl")
     Xdf = pd.DataFrame([r.get("agg_features",{}) for r in results]).fillna(0)
+    shap_local_for_pdf = None
     if model_dep is not None:
         try:
             predp = model_dep.predict_proba(Xdf)[:,1] if hasattr(model_dep, "predict_proba") else model_dep.predict(Xdf)
             full_summary["predictions"]["depression_probabilities"] = predp.tolist()
             st.write("Depression probabilities:", predp)
-            # shap local if available
-            shap_local_dep = None
             if HAS_SHAP:
                 sv = explain_with_shap(model_dep, Xdf)
                 if sv is not None:
-                    # for brevity take first sample contributions sum
-                    try:
-                        # shap returns array-like; compute per-feature mean abs
-                        shap_mean = np.abs(sv).mean(axis=0) if isinstance(sv, np.ndarray) else np.abs(sv.values).mean(axis=0)
-                        feat_imp = dict(zip(Xdf.columns, shap_mean.tolist()))
-                        full_summary.setdefault("xai",{})["depression_global"] = feat_imp
-                        shap_local_dep = dict(sorted(feat_imp.items(), key=lambda x:-x[1])[:8])
-                    except Exception:
-                        shap_local_dep = None
+                    shap_mean = np.abs(sv).mean(axis=0) if isinstance(sv, np.ndarray) else np.abs(sv.values).mean(axis=0)
+                    feat_imp = dict(zip(Xdf.columns, shap_mean.tolist()))
+                    full_summary.setdefault("xai",{})["depression_global"] = feat_imp
+                    shap_local_for_pdf = dict(sorted(feat_imp.items(), key=lambda x:-x[1])[:10])
         except Exception as e:
             st.warning("Depression model prediction failed.")
     if model_ad is not None:
@@ -545,48 +573,38 @@ if run_models and results:
             predp2 = model_ad.predict_proba(Xdf)[:,1] if hasattr(model_ad, "predict_proba") else model_ad.predict(Xdf)
             full_summary["predictions"]["alzheimers_probabilities"] = predp2.tolist()
             st.write("Alzheimer probabilities:", predp2)
-            shap_local_ad = None
             if HAS_SHAP:
                 sv2 = explain_with_shap(model_ad, Xdf)
                 if sv2 is not None:
-                    try:
-                        shap_mean2 = np.abs(sv2).mean(axis=0) if isinstance(sv2, np.ndarray) else np.abs(sv2.values).mean(axis=0)
-                        feat_imp2 = dict(zip(Xdf.columns, shap_mean2.tolist()))
-                        full_summary.setdefault("xai",{})["alzheimers_global"] = feat_imp2
-                        shap_local_ad = dict(sorted(feat_imp2.items(), key=lambda x:-x[1])[:8])
-                    except Exception:
-                        shap_local_ad = None
+                    shap_mean2 = np.abs(sv2).mean(axis=0) if isinstance(sv2, np.ndarray) else np.abs(sv2.values).mean(axis=0)
+                    feat_imp2 = dict(zip(Xdf.columns, shap_mean2.tolist()))
+                    full_summary.setdefault("xai",{})["alzheimers_global"] = feat_imp2
+                    if shap_local_for_pdf is None:
+                        shap_local_for_pdf = dict(sorted(feat_imp2.items(), key=lambda x:-x[1])[:10])
         except Exception as e:
             st.warning("Alzheimer model prediction failed.")
 
-# Generate bilingual report
+# Report generation UI
 st.markdown("---")
 st.header("Report generation")
 col1, col2 = st.columns([2,1])
 with col1:
-    st.write("Preview full summary (JSON):")
+    st.write("Summary (preview):")
     st.json(full_summary)
 with col2:
-    st.write("Actions:")
+    st.write("Actions")
     if results:
-        # choose lang
         lang_choice = st.selectbox("Report language", options=["en","ar"], index=0)
-        # compute shap_local summary to show in report (prefer model dep)
-        shap_local_for_pdf = None
-        if full_summary.get("xai"):
-            if "depression_global" in full_summary["xai"]:
-                shap_local_for_pdf = dict(sorted(full_summary["xai"]["depression_global"].items(), key=lambda x:-x[1])[:10])
-            elif "alzheimers_global" in full_summary["xai"]:
-                shap_local_for_pdf = dict(sorted(full_summary["xai"]["alzheimers_global"].items(), key=lambda x:-x[1])[:10])
-        if st.button("Generate bilingual PDF report"):
+        amiri_path = st.text_input("Amiri TTF path (optional) — leave empty if Amiri-Regular.ttf is in app root", value="")
+        if st.button("Generate PDF report"):
             try:
-                pdf_bytes = generate_pdf_report(full_summary, lang=lang_choice, shap_local=shap_local_for_pdf)
+                pdf_bytes = generate_pdf_report(full_summary, lang=lang_choice, shap_local=shap_local_for_pdf, amiri_path=(amiri_path or None))
                 st.download_button("Download PDF", data=pdf_bytes, file_name=f"NeuroEarly_Report_{now_ts()}.pdf", mime="application/pdf")
             except Exception as e:
                 st.error("PDF generation failed.")
                 log_exc(e)
     else:
-        st.info("Upload and process at least one EDF file to generate report.")
+        st.info("Upload at least one EDF and process to enable report generation.")
 
 st.markdown("---")
 st.caption("Designed and developed by Golden Bird LLC — Vista Kaviani  | Muscat, Sultanate of Oman")
