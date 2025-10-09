@@ -1,0 +1,21 @@
+{
+  "depression_global": {
+    "theta_alpha_ratio": 0.28,
+    "alpha_asym_F3_F4": 0.24,
+    "beta_rel_mean": 0.12,
+    "alpha_rel_mean": 0.10,
+    "theta_rel_mean": 0.08,
+    "delta_rel_mean": 0.06,
+    "theta_beta_ratio": 0.05,
+    "beta_alpha_ratio": 0.04,
+    "gamma_rel_mean": 0.03
+  },
+  "alzheimers_global": {
+    "theta_alpha_ratio": 0.38,
+    "theta_rel_mean": 0.20,
+    "alpha_rel_mean": 0.15,
+    "delta_rel_mean": 0.08,
+    "alpha_asym_F3_F4": 0.06,
+    "beta_rel_mean": 0.05
+  }
+}
