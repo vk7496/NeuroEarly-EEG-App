@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="300" height="80" viewBox="0 0 300 80">
+  <rect rx="10" width="300" height="80" fill="#f8fafc"/>
+  <g transform="translate(14,10)">
+    <circle cx="26" cy="30" r="18" fill="#ffd166"/>
+    <path d="M12 30 C18 18, 40 12, 52 24" stroke="#023e8a" stroke-width="2" fill="none"/>
+    <text x="80" y="42" font-family="Arial" font-size="18" fill="#023e8a">Golden Bird LLC</text>
+    <text x="80" y="60" font-family="Arial" font-size="10" fill="#6b7280">Vista Kaviani — Muscat</text>
+  </g>
+</svg>
