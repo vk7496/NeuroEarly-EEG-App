@@ -1,1108 +1,825 @@
-# app.py — NeuroEarly Pro — Final Pro Edition (single-file, modular style)
-# Full-feature Streamlit app: bilingual (EN/AR), QEEG, Connectivity, Microstates, XAI (SHAP), PDF reports
-# Requirements: streamlit, numpy, pandas, matplotlib, mne, scikit-learn, reportlab,
-# arabic-reshaper, python-bidi, scipy, shap, joblib
-#
-# Put Amiri-Regular.ttf in project root for Arabic UI + PDF.
+# app_neuroearly_pro_clinical.py
+"""
+NeuroEarly Pro — Clinical (Pro edition)
+- Polished UI
+- Bilingual PDF (EN / AR with Amiri if available)
+- EDF reading (mne or pyedflib fallback)
+- Preprocess: notch + bandpass + ICA(if mne)
+- QEEG features, ratios, alpha asymmetry
+- Optional connectivity & microstate
+- XAI via SHAP if available (fallback: precomputed or placeholder)
+- Model hooks: model_depression.pkl, model_alzheimer.pkl (joblib)
+- Branding: Golden Bird LLC in footer
+"""
+import streamlit as st
+st.set_page_config(page_title="NeuroEarly Pro — Clinical (Pro)", layout="wide", initial_sidebar_state="expanded")
 
-import io
-import os
-import json
-import tempfile
-from datetime import datetime, date
-from typing import Dict, List, Optional, Any, Tuple
-
+# core
+import os, io, json, tempfile, traceback
+from datetime import datetime
+from pathlib import Path
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import streamlit as st
 
-# Optional heavy libs
+# Safe optional imports (no ModuleNotFound crash)
+HAS_MNE = False
+HAS_PYEDF = False
+HAS_CONN = False
+HAS_SHAP = False
+HAS_SKLEARN = False
+HAS_REPORTLAB = False
+HAS_ARABIC_TOOLS = False
+HAS_XGBOOST = False
+
 try:
     import mne
     HAS_MNE = True
 except Exception:
     HAS_MNE = False
 
-# Arabic shaping
 try:
-    import arabic_reshaper
-    from bidi.algorithm import get_display
-    HAS_ARABIC_TOOLS = True
+    import pyedflib
+    HAS_PYEDF = True
 except Exception:
-    HAS_ARABIC_TOOLS = False
+    HAS_PYEDF = False
 
-# ML libs
 try:
-    import sklearn
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.ensemble import RandomForestClassifier
-    from sklearn.model_selection import train_test_split
-    from sklearn.metrics import roc_auc_score
-    HAS_SKLEARN = True
+    import mne_connectivity as mne_conn
+    HAS_CONN = True
 except Exception:
-    HAS_SKLEARN = False
-    StandardScaler = None
-    RandomForestClassifier = None
+    HAS_CONN = False
 
-# SHAP
 try:
     import shap
     HAS_SHAP = True
 except Exception:
     HAS_SHAP = False
 
-# Stats
 try:
-    import scipy.stats as stats
-    HAS_SCIPY = True
+    from sklearn.cluster import KMeans
+    from sklearn.preprocessing import StandardScaler
+    HAS_SKLEARN = True
 except Exception:
-    HAS_SCIPY = False
+    HAS_SKLEARN = False
 
-# PDF libs
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.lib import colors
+try:
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    HAS_REPORTLAB = True
+    import arabic_reshaper
+    from bidi.algorithm import get_display
+    HAS_ARABIC_TOOLS = True
+except Exception:
+    HAS_REPORTLAB = False
+    HAS_ARABIC_TOOLS = False
 
-# Joblib
+try:
+    import xgboost
+    HAS_XGBOOST = True
+except Exception:
+    HAS_XGBOOST = False
+
+# plotting fallback: use streamlit built-ins
+from scipy.signal import welch, butter, filtfilt, iirnotch
+
+# joblib for model load
 try:
     import joblib
 except Exception:
     joblib = None
 
-# ---------------- Configuration ----------------
-AMIRI_PATH = "Amiri-Regular.ttf"
-BANDS = {"Delta": (0.5, 4), "Theta": (4, 8), "Alpha": (8, 12), "Beta": (12, 30), "Gamma": (30, 45)}
-DEFAULT_NOTCH = [50, 100]
-ARCHIVE_DIR = "archive"
-MODEL_PATH = "qeeg_risk_model.joblib"
-SCALER_PATH = "qeeg_scaler.joblib"
+# ---------- Constants ----------
+BANDS = {"delta":(0.5,4),"theta":(4,8),"alpha":(8,13),"beta":(13,30)}
+DEFAULT_NOTCH = 50.0
+AMIRI_TTF = "Amiri-Regular.ttf"
 
-# register Amiri if present
-if os.path.exists(AMIRI_PATH):
-    try:
-        if "Amiri" not in pdfmetrics.getRegisteredFontNames():
-            pdfmetrics.registerFont(TTFont("Amiri", AMIRI_PATH))
-    except Exception:
-        pass
+# ---------- Utility helpers ----------
+def now_ts():
+    return datetime.utcnow().strftime("%Y%m%d_%H%M%S")
 
-# ---------------- Utility helpers ----------------
-def reshape_for_ui(text: str) -> str:
-    if HAS_ARABIC_TOOLS:
-        try:
-            return get_display(arabic_reshaper.reshape(text))
-        except Exception:
-            return text
-    return text
+def show_traceback(e):
+    tb = traceback.format_exc()
+    st.error("Internal error — see details.")
+    st.code(tb)
+    print(tb)
 
-def reshape_for_pdf(text: str) -> str:
-    # Use shaping if available; otherwise rely on Amiri font rendering and RTL flags in PDF
-    if HAS_ARABIC_TOOLS:
-        try:
-            return get_display(arabic_reshaper.reshape(text))
-        except Exception:
-            return text
-    return text
+def save_tmp_upload(uploaded_file):
+    with tempfile.NamedTemporaryFile(suffix=".edf", delete=False) as tmp:
+        tmp.write(uploaded_file.getbuffer())
+        tmp.flush()
+        return tmp.name
 
-def fmt(x: Any) -> str:
-    try:
-        return f"{float(x):.4f}"
-    except Exception:
-        return str(x)
-
-def make_serializable(obj: Any):
-    if isinstance(obj, np.ndarray):
-        return obj.tolist()
-    if isinstance(obj, (np.floating, np.float32, np.float64)):
-        return float(obj)
-    if isinstance(obj, (np.integer, np.int32, np.int64)):
-        return int(obj)
-    try:
-        import pandas as _pd
-        if isinstance(obj, (_pd.Series, _pd.DataFrame)):
-            return obj.to_dict(orient='records')
-    except Exception:
-        pass
-    try:
-        if HAS_MNE and isinstance(obj, mne.io.BaseRaw):
-            return {'n_channels': len(getattr(obj, 'ch_names', [])), 'sfreq': obj.info.get('sfreq') if hasattr(obj, 'info') else None}
-    except Exception:
-        pass
-    return str(obj)
-
-# ---------------- Texts (PHQ-9 & AD8 corrected) ----------------
-TEXTS = {
-    'en': {
-        'title': '🧠 NeuroEarly Pro — Clinical',
-        'subtitle': 'EEG / QEEG / Connectivity / Microstates / Explainable Risk — Research demo only.',
-        'upload': '1) Upload EEG file(s) (.edf)',
-        'clean': 'Apply ICA artifact removal (optional; requires scikit-learn)',
-        'compute_connectivity': 'Compute Connectivity (coh/PLI/wPLI) — optional, may be slow',
-        'microstates': 'Microstates analysis (optional)',
-        'phq9': '2) Depression Screening — PHQ-9',
-        'ad8': '3) Cognitive Screening — AD8',
-        'report': '4) Generate Report (JSON / PDF / CSV)',
-        'download_json': '⬇️ Download JSON',
-        'download_pdf': '⬇️ Download PDF',
-        'download_csv': '⬇️ Download CSV',
-        'note': '⚠️ Research/demo only — not a clinical diagnosis.',
-        'phq9_questions': [
-            "Little interest or pleasure in doing things",
-            "Feeling down, depressed, or hopeless",
-            "Trouble falling asleep, staying asleep, or sleeping too much",
-            "Feeling tired or having little energy",
-            "Poor appetite or overeating",
-            "Feeling bad about yourself or feeling like a failure",
-            "Trouble concentrating (e.g., reading, watching TV)",
-            "Moving or speaking very slowly, OR being fidgety/restless",
-            "Thoughts of being better off dead or self-harm"
-        ],
-        'phq9_options': ['0 = Not at all', '1 = Several days', '2 = More than half the days', '3 = Nearly every day'],
-        'ad8_questions': [
-            "Problems with judgment (e.g., poor financial decisions)",
-            "Reduced interest in hobbies/activities",
-            "Repeats questions or stories",
-            "Trouble using a tool or gadget",
-            "Forgets the correct month or year",
-            "Difficulty managing finances (e.g., paying bills)",
-            "Trouble remembering appointments",
-            "Everyday thinking is getting worse"
-        ],
-        'ad8_options': ['No', 'Yes']
-    },
-    'ar': {
-        'title': '🧠 نيوروإيرلي برو — سريري',
-        'subtitle': 'EEG / QEEG / الاتصالات / الميكروستيتس / تفسير المخاطر — عرض بحثي.',
-        'upload': '١) تحميل ملف(های) EEG (.edf)',
-        'clean': 'إزالة مكونات ICA (اختياري؛ يتطلب scikit-learn)',
-        'compute_connectivity': 'حساب الاتصالات (coh/PLI/wPLI) — اختياري وقد يكون بطيئًا',
-        'microstates': 'تحليل الميكروستيتس (اختياري)',
-        'phq9': '٢) استبيان الاكتئاب — PHQ-9',
-        'ad8': '٣) الفحص المعرفي — AD8',
-        'report': '٤) إنشاء التقرير (JSON / PDF / CSV)',
-        'download_json': '⬇️ تنزيل JSON',
-        'download_pdf': '⬇️ تنزيل PDF',
-        'download_csv': '⬇️ تنزيل CSV',
-        'note': '⚠️ أداة بحثية / توجيهية فقط — ليست تشخيصًا نهائيًا.',
-        'phq9_questions': [
-            "قلة الاهتمام أو المتعة في الأنشطة",
-            "الشعور بالحزن أو الاكتئاب أو اليأس",
-            "مشاكل في النوم (صعوبة في النوم أو النوم لفترات طويلة)",
-            "الشعور بالتعب أو قلة الطاقة",
-            "قِلّة الشهية أو الإفراط في الأكل",
-            "الشعور بسوء تجاه النفس أو الشعور بالفشل",
-            "صعوبة في التركيز (مثل القراءة أو مشاهدة التلفاز)",
-            "الحركة أو الكلام ببطء شديد، أو الشعور بفرط الحركة/الاضطراب الحركي",
-            "أفكار بأنك ستكون أفضل حالًا لو كنت ميتًا أو التفكير في إيذاء النفس"
-        ],
-        'phq9_options': ['0 = أبداً', '1 = عدة أيام', '2 = أكثر من نصف الأيام', '3 = كل يوم تقريبًا'],
-        'ad8_questions': [
-            "مشاكل في الحكم (مثل اتخاذ قرارات مالية سيئة)",
-            "انخفاض الاهتمام بالهوايات أو الأنشطة",
-            "تكرار الأسئلة أو القصص",
-            "صعوبة في استخدام أداة أو جهاز",
-            "نسيان الشهر أو السنة الصحيحة",
-            "صعوبة في إدارة الشؤون المالية (مثل دفع الفواتير)",
-            "صعوبة في تذكر المواعيد",
-            "التفكير والذاكرة أسوأ مما كانت عليه سابقًا"
-        ],
-        'ad8_options': ['لا', 'نعم']
-    }
-}
-
-# ---------------- EEG processing & denoising ----------------
-def preprocess_raw(raw, l_freq=1.0, h_freq=40.0, notch_freqs: Optional[List[int]] = DEFAULT_NOTCH, downsample: Optional[int]=None, apply_ref=True):
-    try:
-        raw = raw.copy()
-    except Exception:
-        pass
-    try:
-        if downsample and getattr(raw, 'info', None) and raw.info.get('sfreq', None) and raw.info['sfreq'] > downsample:
-            raw.resample(downsample)
-    except Exception:
-        pass
-    try:
-        raw.filter(l_freq=l_freq, h_freq=h_freq, fir_design='firwin', verbose=False)
-    except Exception:
-        pass
-    try:
-        if notch_freqs:
-            raw.notch_filter(freqs=notch_freqs, verbose=False)
-    except Exception:
-        pass
-    try:
-        if apply_ref:
-            raw.set_eeg_reference('average', verbose=False)
-    except Exception:
-        pass
-    return raw
-
-def advanced_preprocess(raw, l_freq=1.0, h_freq=45.0, notch_freqs: Optional[List[int]] = DEFAULT_NOTCH, downsample: Optional[int]=None, reject_treshold_uV: Optional[float]=150.0):
-    raw = preprocess_raw(raw, l_freq=l_freq, h_freq=h_freq, notch_freqs=notch_freqs, downsample=downsample)
-    # annotate large artifacts
-    try:
-        if reject_treshold_uV and hasattr(raw, 'get_data'):
-            data_uv = raw.get_data() * 1e6
-            sf = int(raw.info['sfreq'])
-            win = int(1.0 * sf)
-            bad_onsets = []
-            for start in range(0, max(1, data_uv.shape[1] - win), win):
-                seg = data_uv[:, start:start+win]
-                if np.max(np.ptp(seg, axis=1)) > reject_treshold_uV:
-                    bad_onsets.append((start/sf, 1.0))
-            if bad_onsets:
-                from mne import Annotations
-                ann = Annotations(onset=[o[0] for o in bad_onsets], duration=[o[1] for o in bad_onsets], description=['BAD_artifact']*len(bad_onsets))
-                raw.set_annotations(raw.annotations + ann)
-    except Exception:
-        pass
-    return raw
-
-def run_ica_and_remove_artifacts(raw, n_components=15, auto_clean_eog=True, auto_clean_ecg=False):
-    result = {'ica_applied': False, 'excluded_components': [], 'note': None}
-    if not HAS_MNE:
-        result['note'] = 'mne not available - ICA skipped'
-        return raw, result
-    if not HAS_SKLEARN:
-        result['note'] = 'scikit-learn not installed - ICA skipped'
-        return raw, result
-    try:
-        ica = mne.preprocessing.ICA(n_components=n_components, random_state=42, verbose=False)
-        picks = mne.pick_types(raw.info, eeg=True, meg=False)
-        ica.fit(raw, picks=picks, verbose=False)
-    except Exception as e:
-        result['note'] = f'ICA fit failed: {e}'
-        return raw, result
-    exclude = []
-    try:
-        if auto_clean_eog:
-            eog_chs = [ch for ch in raw.ch_names if 'EOG' in ch.upper() or 'VEOG' in ch.upper() or 'HEOG' in ch.upper()]
-            for ch in eog_chs:
-                inds, _ = ica.find_bads_eog(raw, ch_name=ch)
-                exclude += inds
-    except Exception:
-        pass
-    try:
-        if auto_clean_ecg:
-            ecg_chs = [ch for ch in raw.ch_names if 'ECG' in ch.upper() or 'EKG' in ch.upper()]
-            for ch in ecg_chs:
-                inds, _ = ica.find_bads_ecg(raw, ch_name=ch)
-                exclude += inds
-    except Exception:
-        pass
-    exclude = list(set(exclude))
-    if exclude:
-        try:
-            ica.exclude = exclude
-            raw_clean = ica.apply(raw.copy())
-            result['ica_applied'] = True
-            result['excluded_components'] = exclude
-            return raw_clean, result
-        except Exception as e:
-            result['note'] = f'ICA apply failed: {e}'
-            return raw, result
+# ---------- EDF loader ----------
+def read_edf_generic(path):
+    """
+    Returns dict:
+      backend: 'mne' or 'pyedflib'
+      data: np.ndarray (n_channels, n_samples)
+      ch_names: list
+      sfreq: float
+      raw: mne.Raw if mne else None
+    """
+    if HAS_MNE:
+        raw = mne.io.read_raw_edf(path, preload=True, verbose=False)
+        data = raw.get_data()
+        return {"backend":"mne", "data":data, "ch_names": raw.ch_names, "sfreq": raw.info.get("sfreq", None), "raw": raw}
+    elif HAS_PYEDF:
+        f = pyedflib.EdfReader(path)
+        n = f.signals_in_file
+        chs = f.getSignalLabels()
+        sf = f.getSampleFrequency(0) if f.getSampleFrequency(0) else None
+        sigs = [f.readSignal(i).astype(np.float64) for i in range(n)]
+        f._close()
+        data = np.vstack(sigs)
+        return {"backend":"pyedflib", "data":data, "ch_names": chs, "sfreq": sf, "raw": None}
     else:
-        result['note'] = 'No ICA components flagged for exclusion'
-        return raw, result
+        raise ImportError("No EDF backend available. Install mne or pyedflib.")
 
-# ---------------- Band powers & QEEG ----------------
-def compute_band_powers_per_channel(raw):
-    psds = None; freqs = None
-    if HAS_MNE and hasattr(raw, 'get_data'):
-        try:
-            psd = raw.compute_psd(fmin=0.5, fmax=45, method='welch', verbose=False)
-            psds, freqs = psd.get_data(return_freqs=True)
-        except Exception:
-            try:
-                psds, freqs = mne.time_frequency.psd_welch(raw, fmin=0.5, fmax=45, verbose=False)
-            except Exception:
-                psds = None
-    if psds is None:
-        try:
-            n_ch = len(raw.ch_names)
-        except Exception:
-            n_ch = 8
-        freqs = np.linspace(0.5, 45, 200)
-        psds = np.zeros((n_ch, len(freqs)))
-        for ch in range(n_ch):
-            psds[ch] = (1.0 / (freqs + 1e-3)) + 0.1 * np.random.rand(len(freqs))
-            psds[ch] += 0.5 * np.exp(-0.5*((freqs-10)/2.0)**2)
-    band_abs = {}
-    band_per_channel = {}
-    for name, (fmin, fmax) in BANDS.items():
-        mask = (freqs >= fmin) & (freqs < fmax)
-        band_power_ch = np.trapz(psds[:, mask], freqs[mask], axis=1)
-        band_per_channel[name] = band_power_ch
-        band_abs[name] = float(np.mean(band_power_ch))
-    total_mean = sum(band_abs.values()) + 1e-12
-    band_rel = {k: float(v / total_mean) for k, v in band_abs.items()}
-    return {'abs_mean': band_abs, 'rel_mean': band_rel, 'per_channel': band_per_channel}
-
-def compute_qeeg_features_safe(raw):
+# ---------- Preprocessing ----------
+def notch_filter(sig, sfreq, freq=DEFAULT_NOTCH, Q=30.0):
+    if sfreq is None or sfreq <= 0:
+        return sig
+    b,a = iirnotch(freq, Q, sfreq)
     try:
-        if HAS_MNE and hasattr(raw, 'get_data'):
-            raw = preprocess_raw(raw)
-        bp = compute_band_powers_per_channel(raw)
-        feats = {}
-        for b, v in bp['abs_mean'].items():
-            feats[f'{b}_abs_mean'] = v
-        for b, v in bp['rel_mean'].items():
-            feats[f'{b}_rel_mean'] = v
-        if 'Theta' in bp['abs_mean'] and 'Beta' in bp['abs_mean']:
-            feats['Theta_Beta_ratio'] = bp['abs_mean']['Theta'] / (bp['abs_mean']['Beta'] + 1e-12)
-        if 'Theta' in bp['abs_mean'] and 'Alpha' in bp['abs_mean']:
-            feats['Theta_Alpha_ratio'] = bp['abs_mean']['Theta'] / (bp['abs_mean']['Alpha'] + 1e-12)
-        if 'Beta' in bp['abs_mean'] and 'Alpha' in bp['abs_mean']:
-            feats['Beta_Alpha_ratio'] = bp['abs_mean']['Beta'] / (bp['abs_mean']['Alpha'] + 1e-12)
-        alpha = bp['per_channel'].get('Alpha') if 'per_channel' in bp and 'Alpha' in bp['per_channel'] else None
-        if alpha is not None and hasattr(raw, 'ch_names'):
-            def idx(ch):
+        return filtfilt(b,a,sig)
+    except Exception:
+        return sig
+
+def bandpass_filter(sig, sfreq, l=0.5, h=45.0, order=4):
+    if sfreq is None or sfreq <= 0:
+        return sig
+    nyq = 0.5 * sfreq
+    low = max(l/nyq, 1e-6)
+    high = min(h/nyq, 0.999)
+    b,a = butter(order, [low, high], btype='band')
+    try:
+        return filtfilt(b,a,sig)
+    except Exception:
+        return sig
+
+def preprocess_full(edfobj, do_notch=True, notch_freq=DEFAULT_NOTCH, l=0.5, h=45.0):
+    data = edfobj["data"].astype(np.float64)
+    sf = edfobj.get("sfreq") or 256.0
+    cleaned = np.zeros_like(data)
+    for i in range(data.shape[0]):
+        x = data[i]
+        if do_notch:
+            x = notch_filter(x, sf, freq=notch_freq)
+        x = bandpass_filter(x, sf, l=l, h=h)
+        cleaned[i] = x
+    return cleaned, sf
+
+# ---------- ICA artifact attempt ----------
+def run_ica(edfobj, n_components=15):
+    if not HAS_MNE or edfobj.get("backend") != "mne":
+        return edfobj["data"], {"ica_status":"not_available"}
+    try:
+        raw = edfobj["raw"]
+        picks = mne.pick_types(raw.info, eeg=True, exclude='bads')
+        ica = mne.preprocessing.ICA(n_components=n_components, random_state=97, verbose=False)
+        ica.fit(raw, picks=picks, verbose=False)
+        # conservative: do not auto-remove components; return fitted info
+        return raw.get_data(), {"ica_status":"fitted", "n_components": ica.n_components_}
+    except Exception as e:
+        return edfobj["data"], {"ica_status":f"failed:{str(e)}"}
+
+# ---------- PSD & band features ----------
+def compute_band_powers_matrix(data, sfreq, picks=None, nperseg=1024):
+    idxs = picks if picks is not None else list(range(data.shape[0]))
+    rows = []
+    for i in idxs:
+        sig = data[i]
+        try:
+            freqs, pxx = welch(sig, fs=sfreq, nperseg=min(nperseg, max(256,len(sig))))
+        except Exception:
+            freqs = np.array([])
+            pxx = np.array([])
+        total = float(np.trapz(pxx, freqs)) if freqs.size>0 else 0.0
+        row = {"channel_idx": i}
+        for b,(lo,hi) in BANDS.items():
+            if freqs.size==0:
+                abs_p = 0.0
+            else:
+                mask = (freqs>=lo) & (freqs<=hi)
+                abs_p = float(np.trapz(pxx[mask], freqs[mask])) if mask.sum()>0 else 0.0
+            rel = float(abs_p/total) if total>0 else 0.0
+            row[f"{b}_abs"] = abs_p
+            row[f"{b}_rel"] = rel
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+def aggregate_band_features(df_bands, ch_names=None):
+    if df_bands.empty:
+        return {}
+    agg = {
+        "alpha_rel_mean": float(df_bands['alpha_rel'].mean()),
+        "beta_rel_mean": float(df_bands['beta_rel'].mean()),
+        "theta_rel_mean": float(df_bands['theta_rel'].mean()),
+        "delta_rel_mean": float(df_bands['delta_rel'].mean()),
+        "theta_alpha_ratio": float((df_bands['theta_rel'].mean()) / (df_bands['alpha_rel'].mean()+1e-9)),
+        "theta_beta_ratio": float((df_bands['theta_rel'].mean()) / (df_bands['beta_rel'].mean()+1e-9))
+    }
+    # alpha asymmetry best-effort: if ch_names contain F3/F4 or Fp1/Fp2
+    if ch_names:
+        try:
+            names = [n.upper() for n in ch_names]
+            def find_idx(token_list):
+                for i,n in enumerate(names):
+                    for t in token_list:
+                        if t in n:
+                            return i
+                return None
+            i_f3 = find_idx(["F3"]); i_f4 = find_idx(["F4"])
+            if i_f3 is not None and i_f4 is not None:
+                v3 = df_bands.loc[df_bands['channel_idx']==i_f3,'alpha_rel'].values
+                v4 = df_bands.loc[df_bands['channel_idx']==i_f4,'alpha_rel'].values
+                if v3.size>0 and v4.size>0:
+                    agg['alpha_asym_F3_F4'] = float(v3[0]-v4[0])
+        except Exception:
+            pass
+    return agg
+
+# ---------- Connectivity (optional) ----------
+def compute_connectivity_summary(raw, sfreq, method="pli", fmin=8, fmax=13):
+    if not (HAS_CONN and HAS_MNE):
+        raise ImportError("Connectivity backend not available")
+    from mne_connectivity import spectral_connectivity
+    try:
+        events = mne.make_fixed_length_events(raw, duration=1.0)
+        epochs = mne.Epochs(raw, events=events, tmin=0.0, tmax=1.0-1.0/raw.info['sfreq'], baseline=None, preload=True, verbose=False)
+        con, freqs, times, n_epochs, n_tapers = spectral_connectivity(epochs, method=method, sfreq=sfreq, fmin=fmin, fmax=fmax, faverage=True, verbose=False)
+        return {"shape": con.shape, "freqs": list(freqs)}
+    except Exception as e:
+        raise
+
+# ---------- Microstate (optional) ----------
+def microstate_summary(data, sfreq, n_states=4):
+    if not HAS_SKLEARN:
+        return {"status":"sklearn_not_available"}
+    try:
+        gfp = data.std(axis=0)
+        thr = np.percentile(gfp, 95)
+        peaks = np.where(gfp >= thr)[0]
+        if peaks.size == 0:
+            return {"status":"no_peaks"}
+        maps = data[:, peaks].T
+        scaler = StandardScaler()
+        maps_s = scaler.fit_transform(maps)
+        kmeans = KMeans(n_clusters=n_states, random_state=42).fit(maps_s)
+        centers = kmeans.cluster_centers_
+        return {"status":"ok", "n_peaks": int(peaks.size), "centers": centers.tolist()}
+    except Exception as e:
+        return {"status": f"failed:{str(e)}"}
+
+# ---------- Model load & XAI ----------
+def load_model_safe(path):
+    try:
+        if joblib and os.path.exists(path):
+            return joblib.load(path)
+    except Exception:
+        pass
+    return None
+
+def compute_shap_summary(model, Xdf):
+    if not HAS_SHAP:
+        return None
+    try:
+        if hasattr(model, "booster") or model.__class__.__name__.lower().startswith("xgb"):
+            expl = shap.TreeExplainer(model)
+            vals = expl.shap_values(Xdf)
+            # aggregate mean abs
+            if isinstance(vals, np.ndarray):
+                mean_abs = np.abs(vals).mean(axis=0)
+                return dict(zip(Xdf.columns, mean_abs.tolist()))
+            else:
                 try:
-                    return raw.ch_names.index(ch)
+                    arr = np.abs(vals.values).mean(axis=0)
+                    return dict(zip(Xdf.columns, arr.tolist()))
                 except Exception:
                     return None
-            for left, right in [('F3','F4'), ('Fp1','Fp2'), ('F7','F8')]:
-                i = idx(left); j = idx(right)
-                if i is not None and j is not None and i < len(alpha) and j < len(alpha):
-                    feats[f'alpha_asym_{left}_{right}'] = float(np.log(alpha[i] + 1e-12) - np.log(alpha[j] + 1e-12))
-        return feats, bp
-    except Exception:
-        bp = {'abs_mean': {k: float(np.random.uniform(0.5, 1.5)) for k in BANDS}, 'rel_mean': {k: float(np.random.uniform(0.05, 0.4)) for k in BANDS}, 'per_channel': {k: np.random.rand(8) for k in BANDS}}
-        feats = {'Theta_Alpha_ratio': float(np.random.uniform(0.6, 1.6)), 'Theta_Beta_ratio': float(np.random.uniform(0.6, 1.6))}
-        return feats, bp
-
-# ---------------- Connectivity safe wrapper ----------------
-def compute_connectivity_final_safe(raw, method='wpli', fmin=4.0, fmax=30.0, epoch_len=2.0, picks: Optional[List[str]] = None, mode='fourier', n_jobs=1):
-    if not HAS_MNE:
-        return {'error': 'mne not available in environment'}
-    try:
-        return compute_connectivity_final(raw, method=method, fmin=fmin, fmax=fmax, epoch_len=epoch_len, picks=picks, mode=mode, n_jobs=n_jobs)
+        else:
+            expl = shap.Explainer(model.predict, Xdf)
+            sv = expl(Xdf)
+            try:
+                arr = np.abs(sv.values).mean(axis=0)
+                return dict(zip(Xdf.columns, arr.tolist()))
+            except Exception:
+                return None
     except Exception as e:
-        return {'error': f'connectivity failed: {e}'}
-
-if HAS_MNE:
-    def compute_connectivity_final(raw, method='wpli', fmin=4.0, fmax=30.0, epoch_len=2.0, picks: Optional[List[str]] = None, mode='fourier', n_jobs=1):
-        from mne.connectivity import spectral_connectivity
-        if picks is None:
-            picks_idx = mne.pick_types(raw.info, eeg=True, meg=False)
-            chs = [raw.ch_names[i] for i in picks_idx]
-        else:
-            picks_idx = [raw.ch_names.index(ch) for ch in picks if ch in raw.ch_names]
-            chs = [raw.ch_names[i] for i in picks_idx]
-        if len(picks_idx) < 2:
-            return {'error': 'Not enough channels for connectivity'}
-        sf = int(raw.info['sfreq'])
-        win_samp = int(epoch_len * sf)
-        data = raw.get_data(picks=picks_idx)
-        n_samps = data.shape[1]
-        n_epochs = n_samps // win_samp
-        if n_epochs < 2:
-            return {'error': 'not enough epochs (recording too short)'}
-        epochs_data = []
-        for ei in range(n_epochs):
-            start = ei * win_samp
-            stop = start + win_samp
-            epochs_data.append(data[:, start:stop])
-        epochs_array = np.stack(epochs_data)
-        info = mne.create_info([raw.ch_names[i] for i in picks_idx], sf, ch_types='eeg')
-        epochs = mne.EpochsArray(epochs_array, info)
-        con, freqs, times, n_epochs_out, n_tapers = spectral_connectivity(
-            epochs, method=method, mode=mode, sfreq=raw.info['sfreq'], fmin=fmin, fmax=fmax, faverage=True, mt_adaptive=False, n_jobs=n_jobs, verbose=False)
-        mean_con = np.nanmean(con, axis=1)
-        n_ch = len(picks_idx)
-        mat = np.zeros((n_ch, n_ch))
-        idx = 0
-        for i in range(n_ch):
-            for j in range(i+1, n_ch):
-                if idx < len(mean_con):
-                    mat[i, j] = mean_con[idx]
-                    mat[j, i] = mean_con[idx]
-                idx += 1
-        return {'matrix': mat, 'channels': chs, 'mean_connectivity': float(np.nanmean(mean_con))}
-
-# ---------------- Microstate analysis (integrated) ----------------
-if HAS_SKLEARN:
-    from sklearn.cluster import KMeans
-
-def compute_gfp(raw) -> Tuple[np.ndarray, np.ndarray]:
-    if HAS_MNE and hasattr(raw, 'get_data'):
-        data = raw.get_data()
-        times = np.arange(data.shape[1]) / raw.info['sfreq']
-    else:
-        data = np.random.randn(8, 1000)
-        times = np.arange(data.shape[1]) / 250.0
-    gfp = np.std(data, axis=0)
-    return gfp, times
-
-def find_gfp_peaks(gfp: np.ndarray, sfreq: float, min_peak_distance_s: float = 0.02, n_peaks: Optional[int]=None):
-    from scipy.signal import find_peaks
-    dist = max(1, int(min_peak_distance_s * sfreq))
-    peaks, _ = find_peaks(gfp, distance=dist)
-    if n_peaks and len(peaks) > n_peaks:
-        order = np.argsort(gfp[peaks])[::-1][:n_peaks]
-        peaks = peaks[order]
-    return np.sort(peaks)
-
-def extract_maps_at_peaks(raw, peaks_idx):
-    if HAS_MNE and hasattr(raw, 'get_data'):
-        data = raw.get_data()
-    else:
-        data = np.random.randn(8, 1000)
-    maps = data[:, peaks_idx].T
-    maps = maps - maps.mean(axis=1, keepdims=True)
-    norms = np.linalg.norm(maps, axis=1, keepdims=True) + 1e-12
-    maps = maps / norms
-    return maps
-
-def run_microstate_kmeans(maps: np.ndarray, n_states: int = 4, random_state: int = 42):
-    if not HAS_SKLEARN:
-        raise RuntimeError("scikit-learn required for microstate clustering")
-    km = KMeans(n_clusters=n_states, random_state=random_state, n_init=20)
-    km.fit(maps)
-    centers = km.cluster_centers_
-    centers = centers - centers.mean(axis=1, keepdims=True)
-    centers = centers / (np.linalg.norm(centers, axis=1, keepdims=True) + 1e-12)
-    return km, centers
-
-def assign_microstates_to_samples(raw, centers):
-    if HAS_MNE and hasattr(raw, 'get_data'):
-        data = raw.get_data()
-    else:
-        data = np.random.randn(centers.shape[1], 1000)
-    data_t = (data.T - data.mean(axis=0))
-    norms = np.linalg.norm(data_t, axis=1, keepdims=True) + 1e-12
-    data_n = data_t / norms
-    centers_n = centers / (np.linalg.norm(centers, axis=1, keepdims=True) + 1e-12)
-    corr = np.dot(data_n, centers_n.T)
-    labels = np.argmax(np.abs(corr), axis=1)
-    return labels, corr
-
-def compute_microstate_stats(labels: np.ndarray, sfreq: float, n_states: int):
-    n_samples = len(labels)
-    total_time_s = n_samples / sfreq
-    stats = {}
-    for s in range(n_states):
-        mask = (labels == s).astype(int)
-        coverage = mask.sum() / n_samples
-        runs = []
-        in_run = False; run_len = 0
-        for v in mask:
-            if v and not in_run:
-                in_run = True; run_len = 1
-            elif v and in_run:
-                run_len += 1
-            elif not v and in_run:
-                runs.append(run_len); in_run = False; run_len = 0
-        if in_run:
-            runs.append(run_len)
-        if runs:
-            mean_dur_ms = np.mean(runs) / sfreq * 1000.0
-            occurrence = len(runs) / total_time_s
-        else:
-            mean_dur_ms = 0.0; occurrence = 0.0
-        stats[s] = {'coverage_frac': coverage, 'mean_duration_ms': float(mean_dur_ms), 'occurrence_per_s': float(occurrence)}
-    return stats
-
-def compute_connectivity_per_microstate(raw, labels, centers, sfreq=None, method='wpli', fmin=4.0, fmax=30.0, epoch_len=2.0):
-    if not HAS_MNE:
-        return {'error': 'mne not available'}
-    if sfreq is None:
-        sfreq = raw.info['sfreq']
-    n_ch = len(raw.ch_names)
-    results = {}
-    for s in range(centers.shape[0]):
-        idxs = np.where(labels == s)[0]
-        if len(idxs) < int(epoch_len*sfreq):
-            results[s] = {'error': 'not enough data for state'}
-            continue
-        segs = []
-        start = idxs[0]; prev = idxs[0]
-        for i in idxs[1:]:
-            if i == prev + 1:
-                prev = i
-            else:
-                segs.append((start, prev)); start = i; prev = i
-        segs.append((start, prev))
-        epochs_list = []
-        win = int(epoch_len * sfreq)
-        for (samp0, samp1) in segs:
-            seg_len = samp1 - samp0 + 1
-            n_full = seg_len // win
-            for k in range(n_full):
-                st0 = samp0 + k*win
-                en0 = st0 + win
-                epochs_list.append(raw.get_data()[:, st0:en0])
-        if len(epochs_list) < 2:
-            results[s] = {'error': 'not enough epochs after chunking'}
-            continue
-        epochs_array = np.stack(epochs_list)
-        info = mne.create_info(raw.ch_names, sfreq, ch_types='eeg')
-        epochs = mne.EpochsArray(epochs_array, info)
-        try:
-            from mne.connectivity import spectral_connectivity
-            con, freqs, times, n_epochs_out, n_tapers = spectral_connectivity(
-                epochs, method=method, mode='fourier', sfreq=sfreq, fmin=fmin, fmax=fmax, faverage=True, mt_adaptive=False, n_jobs=1, verbose=False)
-            mean_con = np.nanmean(con, axis=1)
-            n_chs = len(raw.ch_names)
-            mat = np.zeros((n_chs, n_chs))
-            idx = 0
-            for i in range(n_chs):
-                for j in range(i+1, n_chs):
-                    if idx < len(mean_con):
-                        mat[i, j] = mean_con[idx]; mat[j, i] = mean_con[idx]
-                    idx += 1
-            results[s] = {'matrix': mat, 'channels': raw.ch_names, 'mean_connectivity': float(np.nanmean(mean_con))}
-        except Exception as e:
-            results[s] = {'error': f'connectivity failed: {e}'}
-    return results
-
-# ---------------- Synthetic model + XAI helpers ----------------
-def build_synthetic_dataset(n=1200):
-    rng = np.random.RandomState(42)
-    ta = rng.normal(1.0, 0.4, n)
-    tb = rng.normal(1.0, 0.6, n)
-    asym = rng.normal(0.0, 0.3, n)
-    conn = rng.normal(0.25, 0.1, n)
-    age = rng.normal(60, 12, n)
-    logit = 0.8*(ta-1.0) + 0.6*(tb-1.0) + 0.9*np.maximum(asym, 0) - 1.2*(conn-0.25) + 0.01*(age-60)
-    prob = 1/(1+np.exp(-logit))
-    y = (prob > 0.5).astype(int)
-    X = np.vstack([ta, tb, np.abs(asym), conn, age]).T
-    feat_names = ['Theta_Alpha_ratio','Theta_Beta_ratio','alpha_asym_abs','mean_connectivity','age']
-    return X, y, feat_names
-
-def train_synthetic_model():
-    if not HAS_SKLEARN:
+        print("SHAP error:", e)
         return None
-    X, y, fn = build_synthetic_dataset()
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    scaler = StandardScaler(); Xs = scaler.fit_transform(X_train)
-    clf = RandomForestClassifier(n_estimators=200, random_state=42)
-    clf.fit(Xs, y_train)
-    auc = roc_auc_score(y_test, clf.predict_proba(scaler.transform(X_test))[:,1])
-    return {'model': clf, 'scaler': scaler, 'feat_names': fn, 'auc': auc}
 
-MODEL_OBJ = None
-if os.path.exists(MODEL_PATH) and os.path.exists(SCALER_PATH) and joblib:
+# ---------- PDF generation ----------
+def register_font_amiri(ttf_path=None):
+    """
+    Try to register Amiri TTF if available; return font name to use.
+    """
     try:
-        model_loaded = joblib.load(MODEL_PATH)
-        scaler_loaded = joblib.load(SCALER_PATH)
-        MODEL_OBJ = {'model': model_loaded, 'scaler': scaler_loaded, 'feat_names': ['Theta_Alpha_ratio','Theta_Beta_ratio','alpha_asym_abs','mean_connectivity','age'], 'auc': None}
+        if not HAS_REPORTLAB:
+            return "Helvetica"
+        if ttf_path and Path(ttf_path).exists():
+            pdfmetrics.registerFont(TTFont("Amiri", str(ttf_path)))
+            return "Amiri"
+        p = Path("./Amiri-Regular.ttf")
+        if p.exists():
+            pdfmetrics.registerFont(TTFont("Amiri", str(p)))
+            return "Amiri"
     except Exception:
-        MODEL_OBJ = train_synthetic_model()
-else:
-    MODEL_OBJ = train_synthetic_model()
+        pass
+    return "Helvetica"
 
-MODEL = MODEL_OBJ['model'] if MODEL_OBJ else None
-SCALER = MODEL_OBJ['scaler'] if MODEL_OBJ else None
-FEATURE_NAMES = MODEL_OBJ['feat_names'] if MODEL_OBJ else ['Theta_Alpha_ratio','Theta_Beta_ratio','alpha_asym_abs','mean_connectivity','age']
-MODEL_AUC = MODEL_OBJ['auc'] if MODEL_OBJ else None
-
-def compute_shap_for_instance(model, scaler, feat_names, X_instance: np.ndarray):
-    if not HAS_SHAP or model is None:
-        return None
-    try:
-        explainer = shap.TreeExplainer(model) if hasattr(model, 'feature_importances_') else shap.Explainer(model, feature_names=feat_names)
-        shap_vals = explainer.shap_values(scaler.transform(X_instance.reshape(1,-1)))
-        # produce a simple bar plot for local explanation
-        vals = shap_vals[1][0] if isinstance(shap_vals, list) else shap_vals[0][0]
-        fig, ax = plt.subplots(figsize=(6,2.5))
-        idx = np.argsort(np.abs(vals))[::-1]
-        ax.barh([feat_names[i] for i in idx], vals[idx])
-        ax.set_title('Local feature contributions (SHAP)')
-        plt.tight_layout()
-        buf = io.BytesIO(); plt.savefig(buf, format='png'); buf.seek(0); plt.close(fig)
-        return buf.getvalue()
-    except Exception:
-        # fallback to simple feature importance
+def reshape_ar(text):
+    if HAS_ARABIC_TOOLS:
         try:
-            fig, ax = plt.subplots(figsize=(6,2.5))
-            if hasattr(model, 'feature_importances_'):
-                imp = model.feature_importances_
-                ax.bar(range(len(feat_names)), imp)
-                ax.set_xticks(range(len(feat_names))); ax.set_xticklabels(feat_names, rotation=45)
-            else:
-                ax.text(0.1,0.5,'No SHAP and no feature_importances', transform=ax.transAxes)
-            plt.tight_layout()
-            buf = io.BytesIO(); plt.savefig(buf, format='png'); buf.seek(0); plt.close(fig)
-            return buf.getvalue()
+            return get_display(arabic_reshaper.reshape(text))
         except Exception:
-            return None
+            return text
+    return text
 
-def compute_shap_summary_plot(model, scaler, feat_names, X_sample: np.ndarray):
-    if not HAS_SHAP or model is None:
-        return None
-    try:
-        explainer = shap.TreeExplainer(model)
-        shap_vals = explainer.shap_values(scaler.transform(X_sample))
-        fig = plt.figure(figsize=(6,4))
-        shap.summary_plot(shap_vals, features=X_sample, feature_names=feat_names, show=False)
-        buf = io.BytesIO(); plt.tight_layout(); plt.savefig(buf, format='png'); buf.seek(0); plt.close(fig)
-        return buf.getvalue()
-    except Exception:
-        return None
+def generate_professional_pdf(summary, lang='en', shap_local=None, amiri_path=None):
+    """
+    Professional PDF with Executive Summary, QEEG table, XAI, Structured Recommendations.
+    Returns bytes.
+    """
+    if not HAS_REPORTLAB:
+        # fallback: return json bytes
+        return json.dumps(summary, indent=2, ensure_ascii=False).encode('utf-8')
 
-# ---------------- Plot helpers ----------------
-def plot_band_bar(band_dict: Dict) -> bytes:
-    fig, ax = plt.subplots(figsize=(6,3))
-    ax.bar(list(band_dict.keys()), list(band_dict.values()))
-    ax.set_title('EEG Band Powers (mean across channels)')
-    ax.set_ylabel('Power (a.u.)')
-    plt.tight_layout()
+    font_name = register_font_amiri(amiri_path)
     buf = io.BytesIO()
-    plt.savefig(buf, format='png')
-    buf.seek(0)
-    plt.close(fig)
-    return buf.getvalue()
+    c = canvas.Canvas(buf, pagesize=A4)
+    W, H = A4
+    margin = 40
+    x = margin
+    y = H - margin
 
-def plot_connectivity_heatmap(mat: np.ndarray, chs: List[str]) -> bytes:
-    fig, ax = plt.subplots(figsize=(6,5))
-    vmax = np.nanpercentile(mat, 95) if np.any(mat) else 1.0
-    im = ax.imshow(mat, vmin=0, vmax=vmax)
-    ax.set_xticks(range(len(chs))); ax.set_xticklabels(chs, rotation=90, fontsize=6)
-    ax.set_yticks(range(len(chs))); ax.set_yticklabels(chs, fontsize=6)
-    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    ax.set_title('Connectivity (heatmap)')
-    plt.tight_layout()
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=150)
-    buf.seek(0)
-    plt.close(fig)
-    return buf.getvalue()
-
-# ---------------- PDF builder (language-aware) ----------------
-def build_pdf(results: Dict, patient_info: Dict, lab_results: Dict, meds: List[str], lang='en', band_pngs: Dict[str, bytes]=None, conn_images: Dict[str, bytes]=None, micro_images: Dict[str, bytes]=None, interpretations: List[str]=None, risk_scores: Dict[str,float]=None, shap_images: Dict[str,bytes]=None):
-    buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4)
-    styles = getSampleStyleSheet()
-    use_ar_pdf = (lang == 'ar' and os.path.exists(AMIRI_PATH))
-    if use_ar_pdf:
-        for s in ['Normal','Title','Heading2','Italic']:
-            try:
-                styles[s].fontName='Amiri'
-            except Exception:
-                pass
-    flow = []
-    t = TEXTS[lang]
-    title_text = reshape_for_pdf(t['title']) if use_ar_pdf else t['title']
-    sub_text = reshape_for_pdf(t['subtitle']) if use_ar_pdf else t['subtitle']
-    flow.append(Paragraph(title_text, styles['Title']))
-    flow.append(Paragraph(sub_text, styles['Normal']))
-    flow.append(Spacer(1,12))
-    flow.append(Paragraph(f"Generated: {results.get('timestamp','')}", styles['Normal']))
-    flow.append(Spacer(1,12))
-    # Patient info
-    header_pi = reshape_for_pdf('Patient information:') if use_ar_pdf else 'Patient information:'
-    flow.append(Paragraph(header_pi, styles['Heading2']))
-    if any(patient_info.values()):
-        rows = [['Field','Value']]
-        for k,v in patient_info.items():
-            rows.append([str(k), str(v)])
-        table = Table(rows, colWidths=[150,300])
-        table.setStyle(TableStyle([('GRID',(0,0),(-1,-1),0.25,colors.black),('BACKGROUND',(0,0),(-1,0),colors.lightgrey)]))
-        flow.append(table)
+    # Header block
+    title_en = "NeuroEarly Pro — Clinical Report"
+    title_ar = "تقرير NeuroEarly Pro — سريري"
+    c.setFont(font_name, 18)
+    if lang=='en':
+        c.drawCentredString(W/2, y, title_en)
     else:
-        flow.append(Paragraph('No patient info provided.', styles['Normal']))
-    flow.append(Spacer(1,12))
-    # EEG results
-    flow.append(Paragraph('EEG & QEEG results:', styles['Heading2']))
-    for fname, block in results.get('EEG_files', {}).items():
-        flow.append(Paragraph(f'File: {fname}', styles['Heading2']))
-        rows = [['Band','Absolute','Relative']]
-        for k,v in block.get('bands', {}).items():
-            rel = block.get('relative', {}).get(k,0)
-            rows.append([k, f"{v:.4f}", f"{rel:.4f}"])
-        tble = Table(rows, colWidths=[120,120,120])
-        tble.setStyle(TableStyle([('GRID',(0,0),(-1,-1),0.25,colors.black),('BACKGROUND',(0,0),(-1,0),colors.lightgrey)]))
-        flow.append(tble); flow.append(Spacer(1,6))
-        qrows = [['Feature','Value']]
-        for kk,vv in block.get('QEEG', {}).items():
-            qrows.append([str(kk), fmt(vv)])
-        qtab = Table(qrows, colWidths=[240,120])
-        qtab.setStyle(TableStyle([('GRID',(0,0),(-1,-1),0.25,colors.black),('BACKGROUND',(0,0),(-1,0),colors.lightgrey)]))
-        flow.append(qtab); flow.append(Spacer(1,6))
-        if band_pngs and fname in band_pngs:
-            flow.append(RLImage(io.BytesIO(band_pngs[fname]), width=400, height=140)); flow.append(Spacer(1,6))
-        if conn_images and fname in conn_images and not results['EEG_files'][fname].get('connectivity',{}).get('error'):
-            flow.append(RLImage(io.BytesIO(conn_images[fname]), width=400, height=200)); flow.append(Spacer(1,6))
-        if shap_images and fname in shap_images:
-            flow.append(Paragraph('Model explanation (features contributing to risk):', styles['Normal']))
-            flow.append(RLImage(io.BytesIO(shap_images[fname]), width=400, height=200)); flow.append(Spacer(1,6))
-        flow.append(Spacer(1,10))
-    # interpretations & recs
-    flow.append(Paragraph('Automated interpretation (heuristic + model):', styles['Heading2']))
-    if interpretations:
-        for line in interpretations:
-            flow.append(Paragraph(line, styles['Normal']))
-    else:
-        flow.append(Paragraph('No heuristic interpretations.', styles['Normal']))
-    flow.append(Spacer(1,12))
-    flow.append(Paragraph('Structured recommendations (for clinician):', styles['Heading2']))
-    recs = [
-        'Correlate QEEG/connectivity findings with PHQ-9 and AD8 and clinical interview.',
-        'If PHQ-9 suggests moderate/severe depression or left frontal alpha asymmetry found, consider psychiatric referral and treatment planning (psychotherapy ± pharmacotherapy).',
-        'If AD8 elevated or theta increase present, consider neurocognitive assessment and neuroimaging (MRI) as needed.',
-        'Review current medications for EEG-affecting agents; adjust medications if clinically indicated.',
-        'Consider short-interval follow-up EEG or ambulatory EEG if findings are unclear or inconsistent with clinical picture.',
-        'If suicidal ideation present (PHQ-9 item), arrange urgent psychiatric evaluation.'
-    ]
-    for r in recs:
-        flow.append(Paragraph(r, styles['Normal']))
-    flow.append(Spacer(1,12))
-    flow.append(Paragraph(TEXTS['en']['note'], styles['Italic']))
-    doc.build(flow)
-    buf.seek(0)
-    return buf.getvalue()
+        c.drawCentredString(W/2, y, reshape_ar(title_ar))
+    y -= 30
 
-# ---------------- Streamlit UI ----------------
-st.set_page_config(page_title='NeuroEarly Pro — Clinical', layout='wide')
-# Basic CSS + Amiri if available
-css = """
+    # Executive Summary (box)
+    def draw_boxed_heading(title):
+        nonlocal y
+        c.setFont(font_name, 12)
+        if lang=='en':
+            c.drawString(x, y, title)
+        else:
+            c.drawRightString(W-margin, y, reshape_ar(title))
+        y -= 14
+
+    # Executive summary content
+    draw_boxed_heading("Executive Summary / الملخص التنفيذي")
+    c.setFont(font_name, 10)
+    p = summary.get("patient",{})
+    if lang=='en':
+        c.drawString(x, y, f"Patient: {p.get('name','-')}  | ID: {p.get('id','-')}  | DOB: {p.get('dob','-')}")
+        y -= 12
+        # ML risk
+        risk = summary.get("ml_risk", None)
+        if risk is not None:
+            c.drawString(x, y, f"ML Risk Score: {risk:.2f}%")
+            y -= 12
+        rc = summary.get("risk_category", None)
+        if rc:
+            c.drawString(x, y, f"Risk Category: {rc}")
+            y -= 12
+        ps = summary.get("primary_suggestion", "")
+        if ps:
+            c.drawString(x, y, f"Primary Suggestion: {ps}")
+            y -= 12
+        # QEEG heuristic
+        qh = summary.get("qeegh", "")
+        if qh:
+            c.drawString(x, y, f"QEEG Interpretation: {qh}")
+            y -= 12
+    else:
+        # Arabic right-aligned
+        c.drawRightString(W-margin, y, reshape_ar(f"المريض: {p.get('name','-')}  المعرف: {p.get('id','-')}  الميلاد: {p.get('dob','-')}"))
+        y -= 12
+        risk = summary.get("ml_risk", None)
+        if risk is not None:
+            c.drawRightString(W-margin, y, reshape_ar(f"معدل الخطر ML: {risk:.2f}%"))
+            y -= 12
+        rc = summary.get("risk_category", None)
+        if rc:
+            c.drawRightString(W-margin, y, reshape_ar(f"فئة الخطر: {rc}"))
+            y -= 12
+        ps = summary.get("primary_suggestion", "")
+        if ps:
+            c.drawRightString(W-margin, y, reshape_ar(f"التوصية الأساسية: {ps}"))
+            y -= 12
+        qh = summary.get("qeegh", "")
+        if qh:
+            c.drawRightString(W-margin, y, reshape_ar(qh))
+            y -= 12
+    y -= 6
+
+    # QEEG Metrics table
+    draw_boxed_heading("QEEG Key Metrics / مؤشرات QEEG الأساسية")
+    c.setFont(font_name, 10)
+    # If files present, list first file metrics
+    if summary.get("files"):
+        f0 = summary["files"][0]
+        # Table-like layout
+        metrics = f0.get("agg_features", {})
+        table_lines = [
+            ("Theta/Alpha Ratio", f"{metrics.get('theta_alpha_ratio', 'N/A'):.3f}" if metrics.get('theta_alpha_ratio') else "N/A"),
+            ("Theta/Beta Ratio", f"{metrics.get('theta_beta_ratio', 'N/A'):.3f}" if metrics.get('theta_beta_ratio') else "N/A"),
+            ("Alpha mean (rel)", f"{metrics.get('alpha_rel_mean', 0):.4f}"),
+            ("Theta mean (rel)", f"{metrics.get('theta_rel_mean', 0):.4f}"),
+            ("Alpha Asymmetry (F3-F4)", f"{metrics.get('alpha_asym_F3_F4','N/A')}")
+        ]
+        for label, val in table_lines:
+            if lang=='en':
+                c.drawString(x+6, y, f"{label}: {val}")
+            else:
+                c.drawRightString(W-margin, y, reshape_ar(f"{label}: {val}"))
+            y -= 12
+    else:
+        if lang=='en':
+            c.drawString(x+6, y, "No EDF processed yet.")
+        else:
+            c.drawRightString(W-margin, y, reshape_ar("لا توجد ملفات EDF معالجة بعد."))
+        y -= 14
+    y -= 6
+
+    # XAI summary top features
+    draw_boxed_heading("Explainable AI (XAI) — Top contributors / الذكاء الاصطناعي القابل للتفسير")
+    c.setFont(font_name, 10)
+    xai_block = summary.get("xai_summary", {})
+    if xai_block:
+        # show top contributors
+        for feat,imp in list(xai_block.items())[:10]:
+            if lang=='en':
+                c.drawString(x+6, y, f"{feat}: {imp:.4f}")
+            else:
+                c.drawRightString(W-margin, y, reshape_ar(f"{feat}: {imp:.4f}"))
+            y -= 10
+            if y < 100:
+                c.showPage(); y = H - margin
+    else:
+        if lang=='en':
+            c.drawString(x+6, y, "XAI not available (SHAP not installed or no model).")
+        else:
+            c.drawRightString(W-margin, y, reshape_ar("XAI غير متاح (SHAP غير مثبت أو لا يوجد نموذج)."))
+        y -= 14
+    y -= 6
+
+    # Structured recommendations
+    draw_boxed_heading("Structured Clinical Recommendations / التوصيات السريرية المنظمة")
+    c.setFont(font_name, 10)
+    recs = summary.get("recommendations", [])
+    if recs:
+        for r in recs:
+            if lang=='en':
+                c.drawString(x+6, y, f"- {r}")
+            else:
+                c.drawRightString(W-margin, y, reshape_ar(f"- {r}"))
+            y -= 10
+            if y < 100:
+                c.showPage(); y = H - margin
+    else:
+        if lang=='en':
+            c.drawString(x+6, y, "No recommendations generated.")
+        else:
+            c.drawRightString(W-margin, y, reshape_ar("لا توجد توصيات."))
+        y -= 12
+
+    # Footer branding
+    footer_en = "Designed and developed by Golden Bird LLC — Vista Kaviani | Muscat, Sultanate of Oman"
+    footer_ar = reshape_ar("صمّم وطوّر من قبل شركة Golden Bird LLC — فيستا كاوياني | مسقط، سلطنة عمان")
+    c.setFont(font_name, 9)
+    if lang=='en':
+        c.drawCentredString(W/2, 30, footer_en)
+    else:
+        c.drawCentredString(W/2, 30, footer_ar)
+    c.setFont(font_name, 8)
+    disc = "Research/demo only — Not a clinical diagnosis."
+    c.drawCentredString(W/2, 18, reshape_ar(disc) if lang!='en' else disc)
+
+    c.save()
+    buf.seek(0)
+    return buf.read()
+
+# ---------- UI: polished layout ----------
+# Top header bar
+st.markdown("""
 <style>
-body { background-color: #f3f8ff; }
-.card { background: white; padding: 12px; border-radius: 10px; box-shadow: 0 2px 6px rgba(0,0,0,0.06); margin-bottom: 12px; }
-.small { font-size: 0.9rem; color: #444; }
+body { background-color: #f7fafc; }
+.header-card {background: linear-gradient(90deg, #0f172a, #1e293b); color: white; padding: 18px; border-radius: 10px;}
+.small-muted { color: #6b7280; font-size:12px; }
+.card { background: white; padding: 14px; border-radius:10px; box-shadow: 0 1px 4px rgba(0,0,0,0.05); }
+.metric-green { color: #16a34a; font-weight:600; }
+.metric-amber { color: #f59e0b; font-weight:600; }
+.metric-red { color: #ef4444; font-weight:600; }
 </style>
-"""
-st.markdown(css, unsafe_allow_html=True)
-if os.path.exists(AMIRI_PATH):
-    st.markdown(f"""
-    <style>
-    @font-face {{
-      font-family: 'AmiriCustom';
-      src: url('/{AMIRI_PATH}') format('truetype');
-    }}
-    .ar-rtl {{ font-family: 'AmiriCustom', serif !important; direction: rtl !important; text-align: right !important; }}
-    </style>
-    """, unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
-# Sidebar language
-st.sidebar.title("🌐 Language / اللغة")
-lang = st.sidebar.radio("Choose / اختر", ["en", "ar"])
-t = TEXTS[lang]
+col_a, col_b = st.columns([4,1])
+with col_a:
+    st.markdown("<div class='header-card'><h1 style='margin:0'>🧠 NeuroEarly Pro — Clinical (Pro)</h1><div class='small-muted'>EEG/QEEG + XAI — Professional clinical reporting</div></div>", unsafe_allow_html=True)
+with col_b:
+    st.markdown("<div style='text-align:right'><img src='https://raw.githubusercontent.com/vk7496/placeholder/main/logo.png' width='84' /></div>", unsafe_allow_html=True)
 
-# Header card
-st.markdown("<div class='card'>", unsafe_allow_html=True)
-if lang == 'ar' and os.path.exists(AMIRI_PATH):
-    st.markdown(f"<h1 class='ar-rtl'>{reshape_for_ui(t['title'])}</h1>", unsafe_allow_html=True)
-    st.markdown(f"<div class='small ar-rtl'>{reshape_for_ui(t['subtitle'])}</div>", unsafe_allow_html=True)
-else:
-    st.markdown(f"<h1>{t['title']}</h1>", unsafe_allow_html=True)
-    st.markdown(f"<div class='small'>{t['subtitle']}</div>", unsafe_allow_html=True)
-st.markdown("</div>", unsafe_allow_html=True)
+st.markdown("")  # spacing
 
-# Patient form
-with st.expander(reshape_for_ui("🔎 Optional: Patient information / معلومات المريض") if (lang=='ar' and HAS_ARABIC_TOOLS) else "🔎 Optional: Patient information / معلومات المريض"):
-    name = st.text_input(reshape_for_ui("Full name / الاسم الكامل") if (lang=='ar' and HAS_ARABIC_TOOLS) else "Full name / الاسم الكامل")
-    patient_id = st.text_input(reshape_for_ui("Patient ID / رقم المريض") if (lang=='ar' and HAS_ARABIC_TOOLS) else "Patient ID / رقم المريض")
-    if lang == 'en':
-        gender = st.selectbox('Gender', ['', 'Male', 'Female', 'Other'])
+# Sidebar controls
+with st.sidebar:
+    st.header("Settings & Patient")
+    lang = st.selectbox("Report language / اللغة", options=["en","ar"], index=0)
+    st.markdown("---")
+    st.subheader("Patient")
+    patient_name = st.text_input("Name / اسم")
+    patient_id = st.text_input("ID")
+    dob = st.date_input("DOB")
+    sex = st.selectbox("Sex / الجنس", ("Unknown","Male","Female","Other"))
+    st.markdown("---")
+    st.write("Model files (optional): put model_depression.pkl & model_alzheimer.pkl in app root")
+    st.write(f"mne installed: {HAS_MNE} | pyedflib: {HAS_PYEDF} | shap: {HAS_SHAP}")
+
+# Main content
+st.markdown("### 1) Upload EDF files")
+uploads = st.file_uploader("Drag & drop EDF files here (.edf)", type=["edf"], accept_multiple_files=True)
+
+# PHQ-9 UI (corrected)
+st.markdown("### 2) PHQ-9 (Depression screening)")
+PHQ9_ITEMS = [
+ "Little interest or pleasure in doing things",
+ "Feeling down, depressed, or hopeless",
+ "Trouble falling/staying asleep, or sleeping too much",
+ "Feeling tired or having little energy",
+ "Poor appetite or overeating",
+ "Feeling bad about yourself — or that you are a failure",
+ "Trouble concentrating on things, such as reading or watching TV",
+ "Moving or speaking slowly OR being fidgety/restless",
+ "Thoughts that you would be better off dead or of harming yourself"
+]
+phq = {}
+cols = st.columns(3)
+for i,item in enumerate(PHQ9_ITEMS, start=1):
+    with cols[(i-1)%3]:
+        phq[f"q{i}"] = st.radio(f"Q{i}", [0,1,2,3], index=0, key=f"phq{i}", horizontal=True)
+phq_total = sum(phq.values())
+st.info(f"PHQ-9 total: {phq_total} (0–4 minimal, 5–9 mild, 10–14 moderate, 15–19 mod-severe, 20–27 severe)")
+
+# AD8 UI
+st.markdown("### 3) AD8 (Cognitive screening)")
+AD8_ITEMS = [
+ "Problems with judgment (e.g., problems making decisions)",
+ "Less interest in hobbies/activities",
+ "Repeats questions/stories",
+ "Trouble learning to use a tool, appliance, or gadget",
+ "Forgetting the correct month or year",
+ "Difficulty handling complicated financial affairs",
+ "Trouble remembering appointments",
+ "Daily problems with thinking and memory"
+]
+ad8 = {}
+for i,item in enumerate(AD8_ITEMS, start=1):
+    ad8[f"a{i}"] = st.radio(f"A{i}", [0,1], index=0, key=f"ad8_{i}", horizontal=True)
+ad8_total = sum(ad8.values())
+st.info(f"AD8 total: {ad8_total} (score ≥2 suggests cognitive impairment)")
+
+# Processing options
+st.markdown("---")
+st.header("Processing options & actions")
+do_ica = st.checkbox("Attempt ICA (if mne available)", value=False)
+do_conn = st.checkbox("Compute connectivity (if available)", value=False)
+do_micro = st.checkbox("Microstate analysis (if sklearn available)", value=False)
+run_models = st.checkbox("Run models (if model files present)", value=True)
+amiri_path_input = st.text_input("Amiri TTF path (optional)", value="")
+
+# Process
+results = []
+if uploads:
+    st.markdown("### Processing EDF(s)...")
+    prog_bar = st.progress(0)
+    for idx, up in enumerate(uploads, start=1):
+        try:
+            st.markdown(f"**File:** {up.name} ({up.size/1024/1024:.2f} MB)")
+            tmp = save_tmp_upload(up)
+            edf = read_edf_generic(tmp)
+            st.success(f"Loaded (backend: {edf.get('backend')}) channels: {len(edf.get('ch_names',[]))}  sfreq: {edf.get('sfreq','-')}")
+            data_pre, sf = preprocess_full(edf)
+            ica_info = None
+            if do_ica:
+                data_pre, ica_info = run_ica(edf)
+                st.write("ICA status:", ica_info)
+            df_bands = compute_band_powers_matrix(data_pre, sf)
+            st.dataframe(df_bands.head(10))
+            agg = aggregate_band_features(df_bands, ch_names=edf.get('ch_names'))
+            st.write("Aggregated features:", agg)
+            conn_summary = None
+            if do_conn and HAS_CONN and HAS_MNE and edf.get("backend")=="mne":
+                try:
+                    conn_summary = compute_connectivity_summary(edf["raw"], sf)
+                    st.write("Connectivity:", conn_summary)
+                except Exception as e:
+                    st.warning("Connectivity failed: " + str(e))
+            micro = None
+            if do_micro and HAS_SKLEARN:
+                micro = microstate_summary(data_pre, sf)
+                st.write("Microstate:", micro)
+            results.append({
+                "filename": up.name,
+                "raw_summary": {"n_channels": int(data_pre.shape[0]), "sfreq": float(sf)},
+                "df_bands": df_bands,
+                "agg_features": agg,
+                "connectivity": conn_summary,
+                "microstate": micro
+            })
+        except Exception as e:
+            st.error(f"Failed processing {up.name}: {e}")
+            show_traceback(e)
+        prog_bar.progress(int(100*idx/len(uploads)))
+    prog_bar.empty()
+
+# Build full summary
+full_summary = {
+    "patient": {"name": patient_name, "id": patient_id, "dob": str(dob), "sex": sex},
+    "phq9": {"total": phq_total, "items": phq},
+    "ad8": {"total": ad8_total, "items": ad8},
+    "files": results,
+    "ml_risk": None,
+    "risk_category": None,
+    "primary_suggestion": None,
+    "qeegh": None,
+    "predictions": {},
+    "xai_summary": {},
+    "recommendations": []
+}
+
+# Simple heuristic QEEG text (for Executive Summary) — example
+if results:
+    # pick first file agg
+    af = results[0].get("agg_features", {})
+    if af:
+        # example heuristic
+        t_a = af.get("theta_alpha_ratio", None)
+        if t_a:
+            if t_a > 1.4:
+                full_summary["qeegh"] = "Elevated Theta/Alpha ratio consistent with early cognitive slowing."
+            elif t_a > 1.1:
+                full_summary["qeegh"] = "Mild elevation of Theta/Alpha ratio; correlate clinically."
+            else:
+                full_summary["qeegh"] = "Theta/Alpha within expected range."
+
+# Load models (optional) and compute predictions + XAI
+if run_models and results:
+    model_dep = load_model_safe("model_depression.pkl")
+    model_ad = load_model_safe("model_alzheimer.pkl")
+    Xdf = pd.DataFrame([r.get("agg_features",{}) for r in results]).fillna(0)
+    if model_dep is not None:
+        try:
+            preds = model_dep.predict_proba(Xdf)[:,1] if hasattr(model_dep, "predict_proba") else model_dep.predict(Xdf)
+            full_summary["predictions"]["depression_probabilities"] = preds.tolist()
+            # ml risk combine (simple avg)
+            full_summary["ml_risk"] = float(np.mean(preds))*100.0
+        except Exception:
+            full_summary["predictions"]["depression_probabilities"] = None
+    if model_ad is not None:
+        try:
+            preds2 = model_ad.predict_proba(Xdf)[:,1] if hasattr(model_ad, "predict_proba") else model_ad.predict(Xdf)
+            full_summary["predictions"]["alzheimers_probabilities"] = preds2.tolist()
+            if full_summary["ml_risk"] is None:
+                full_summary["ml_risk"] = float(np.mean(preds2))*100.0
+            else:
+                # combine by average
+                full_summary["ml_risk"] = float((full_summary["ml_risk"]/100.0 + np.mean(preds2))/2.0 * 100.0)
+        except Exception:
+            full_summary["predictions"]["alzheimers_probabilities"] = None
+
+    # risk categorization
+    if full_summary["ml_risk"] is not None:
+        r = full_summary["ml_risk"]
+        if r >= 50:
+            full_summary["risk_category"] = "High"
+        elif r >= 25:
+            full_summary["risk_category"] = "Moderate"
+        else:
+            full_summary["risk_category"] = "Low"
+        # primary suggestion based on risk
+        if full_summary["risk_category"] == "High":
+            full_summary["primary_suggestion"] = "Urgent neurological referral and imaging recommended."
+        elif full_summary["risk_category"] == "Moderate":
+            full_summary["primary_suggestion"] = "Clinical follow-up and further cognitive testing recommended (AD8, MMSE)."
+        else:
+            full_summary["primary_suggestion"] = "Routine monitoring; correlate with PHQ-9 / AD8."
+
+    # SHAP summary
+    shap_sum_dep = None
+    shap_sum_ad = None
+    if HAS_SHAP:
+        try:
+            if model_dep is not None:
+                sdep = compute_shap_summary(model_dep, Xdf)
+                if sdep:
+                    full_summary["xai_summary"]["depression_global"] = sdep
+            if model_ad is not None:
+                sad = compute_shap_summary(model_ad, Xdf)
+                if sad:
+                    full_summary["xai_summary"]["alzheimers_global"] = sad
+        except Exception as e:
+            print("SHAP compute error:", e)
+
+# Simple rule-based recommendations (expandable)
+if full_summary["qeegh"]:
+    if "Elevated Theta/Alpha" in full_summary["qeegh"] or (full_summary.get("ml_risk") and full_summary["ml_risk"]>25):
+        full_summary["recommendations"].append("Correlate QEEG with AD8 and formal cognitive testing (MMSE).")
+        full_summary["recommendations"].append("Check B12 and TSH to rule out reversible causes.")
+        full_summary["recommendations"].append("Consider MRI or FDG-PET if ML risk > 25% and Theta/Alpha > 1.4.")
     else:
-        gender = st.selectbox('الجنس', ['', 'ذكر', 'أنثى', 'آخر'])
-    min_dob = date(1920, 1, 1); max_dob = date.today()
-    dob = st.date_input(reshape_for_ui('Date of birth / تاريخ الميلاد') if (lang=='ar' and HAS_ARABIC_TOOLS) else 'Date of birth / تاريخ الميلاد', value=None, min_value=min_dob, max_value=max_dob)
-    phone = st.text_input(reshape_for_ui('Phone / الهاتف') if (lang=='ar' and HAS_ARABIC_TOOLS) else 'Phone / الهاتف')
-    email = st.text_input(reshape_for_ui('Email / البريد الإلكتروني') if (lang=='ar' and HAS_ARABIC_TOOLS) else 'Email / البريد الإلكتروني')
-    history = st.text_area(reshape_for_ui('Relevant history (diabetes, HTN, family history...) / التاريخ الطبي') if (lang=='ar' and HAS_ARABIC_TOOLS) else 'Relevant history (diabetes, HTN, family history...) / التاريخ الطبي', height=80)
+        full_summary["recommendations"].append("Clinical follow-up and re-evaluation in 3-6 months.")
 
-patient_info = {'name': name, 'id': patient_id, 'gender': gender, 'dob': dob.strftime('%Y-%m-%d') if dob else '', 'age': int((datetime.now().date()-dob).days/365) if dob else '', 'phone': phone, 'email': email, 'history': history}
+# UI: show summary and actions
+st.markdown("---")
+st.header("Summary & Actions")
+colL, colR = st.columns([2,1])
+with colL:
+    st.subheader("Patient summary")
+    st.write(full_summary["patient"])
+    st.subheader("ML Risk & QEEG")
+    if full_summary["ml_risk"] is not None:
+        val = full_summary["ml_risk"]
+        if val < 25:
+            clr = "metric-green"
+        elif val < 50:
+            clr = "metric-amber"
+        else:
+            clr = "metric-red"
+        st.markdown(f"<div class='{clr}' style='font-size:20px'>ML Risk Score: {val:.1f}% — {full_summary.get('risk_category','-')}</div>", unsafe_allow_html=True)
+    else:
+        st.info("No model predictions available. Place model files to enable predictions.")
+    st.markdown("**QEEG narrative:**")
+    st.write(full_summary.get("qeegh","-"))
+    st.markdown("**Recommendations:**")
+    for r in full_summary.get("recommendations",[]):
+        st.write("- " + r)
 
-with st.expander(reshape_for_ui("🧪 Optional: Recent lab tests / التحاليل") if (lang=='ar' and HAS_ARABIC_TOOLS) else "🧪 Optional: Recent lab tests / التحاليل"):
-    lab_glucose = st.text_input('Glucose'); lab_b12 = st.text_input('Vitamin B12'); lab_vitd = st.text_input('Vitamin D'); lab_tsh = st.text_input('TSH'); lab_crp = st.text_input('CRP')
-lab_results = {}
-if lab_glucose: lab_results['Glucose'] = lab_glucose
-if lab_b12: lab_results['Vitamin B12'] = lab_b12
-if lab_vitd: lab_results['Vitamin D'] = lab_vitd
-if lab_tsh: lab_results['TSH'] = lab_tsh
-if lab_crp: lab_results['CRP'] = lab_crp
+with colR:
+    st.subheader("Files processed")
+    st.write(f"{len(results)} file(s)")
+    if results:
+        # show aggregated metrics table
+        rows = []
+        for r in results:
+            af = r.get("agg_features",{})
+            rows.append({
+                "file": r.get("filename"),
+                "alpha_rel": af.get("alpha_rel_mean","-"),
+                "theta_rel": af.get("theta_rel_mean","-"),
+                "theta/alpha": af.get("theta_alpha_ratio","-")
+            })
+        st.table(pd.DataFrame(rows))
 
-with st.expander(reshape_for_ui("💊 Current medications (one per line) / الأدوية الحالية") if (lang=='ar' and HAS_ARABIC_TOOLS) else "💊 Current medications (one per line) / الأدوية الحالية"):
-    meds_text = st.text_area(reshape_for_ui('List medications / اكتب الأدوية') if (lang=='ar' and HAS_ARABIC_TOOLS) else 'List medications / اكتب الأدوية', height=120)
-meds_list = [m.strip() for m in meds_text.splitlines() if m.strip()]
+# XAI visualization (simple)
+if full_summary.get("xai_summary"):
+    st.markdown("### XAI — Top global features")
+    xs = full_summary["xai_summary"]
+    # prefer depression global then alzheimers
+    xai_display = xs.get("depression_global") or xs.get("alzheimers_global") or {}
+    if xai_display:
+        feat_df = pd.Series(xai_display).sort_values(ascending=False).head(10)
+        st.bar_chart(feat_df)
+    else:
+        st.info("XAI: SHAP not computed or no model available.")
 
-# Main tabs
-tab_upload, tab_phq, tab_ad8, tab_micro, tab_report = st.tabs([t['upload'], t['phq9'], t['ad8'], t['microstates'], t['report']])
-
-EEG_results = {'EEG_files': {}}
-band_pngs = {}
-conn_imgs = {}
-micro_imgs = {}
-shap_images = {}
-
-# Upload tab
-with tab_upload:
-    st.header(t['upload'])
-    uploaded_files = st.file_uploader("EDF files / ملفات EDF", type=['edf'], accept_multiple_files=True)
-    apply_ica = st.checkbox(t['clean'])
-    compute_conn = st.checkbox(t['compute_connectivity'])
-    conn_method = st.selectbox("Connectivity method / طريقة الاتصالات", ['coh','pli','wpli'])
-    notch_choice = st.multiselect("Notch frequencies (Hz) / ترددات Notch", [50,60,100,120], default=[50,100])
-    epoch_len = st.slider("Epoch length for connectivity (s)", 1.0, 5.0, 2.0, step=0.5)
-    downsample = st.selectbox("Downsample to (Hz) — optional", [None, 256, 200, 128], index=0)
-    # advanced denoising
-    reject_uV = st.number_input('Reject threshold (µV) for annotation (0 disable)', min_value=0.0, max_value=1000.0, value=150.0)
-    auto_clean_eog = st.checkbox('Auto-remove EOG components (if detected)', value=True)
-    auto_clean_ecg = st.checkbox('Auto-remove ECG components (if detected)', value=False)
-    # microstate options
-    run_microstate_per_file = st.checkbox('Run Microstate analysis per file (may be slow)', value=False)
-    micro_k = st.slider('Microstate K', 2, 7, 4)
-
-    if uploaded_files:
-        os.makedirs(ARCHIVE_DIR, exist_ok=True)
-        for f in uploaded_files:
-            st.info(f'Processing {f.name} ...')
+# Report generation
+st.markdown("---")
+st.header("Generate Professional Report (PDF)")
+st.markdown("Executive summary, QEEG metrics, XAI, and structured recommendations will be included.")
+if results:
+    colp1, colp2 = st.columns([3,1])
+    with colp1:
+        lang_choice = st.selectbox("Report language", options=["en","ar"], index=0)
+        amiri_path = st.text_input("Optional Amiri TTF path (leave empty if Amiri-Regular.ttf in root)", value="")
+    with colp2:
+        if st.button("Generate PDF"):
             try:
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.edf') as tmp:
-                    tmp.write(f.read()); tmp.flush(); tmp_name = tmp.name
-                if HAS_MNE:
-                    raw = mne.io.read_raw_edf(tmp_name, preload=True, verbose=False)
-                else:
-                    # dummy raw
-                    class RawDummy:
-                        def __init__(self):
-                            self.ch_names = [f'Ch{i+1}' for i in range(8)]
-                            self.info = {'sfreq': 250}
-                        def get_data(self, picks=None):
-                            return np.random.randn(8, 250*60)
-                    raw = RawDummy()
-
-                if HAS_MNE and hasattr(raw, 'get_data'):
-                    raw = advanced_preprocess(raw, notch_freqs=notch_choice if notch_choice else DEFAULT_NOTCH, downsample=downsample, reject_treshold_uV=(reject_uV if reject_uV>0 else None))
-                if apply_ica:
-                    raw, ica_info = run_ica_and_remove_artifacts(raw, n_components=15, auto_clean_eog=auto_clean_eog, auto_clean_ecg=auto_clean_ecg)
-                    if ica_info.get('note'):
-                        st.info(f"ICA note: {ica_info['note']}")
-                    if ica_info.get('excluded_components'):
-                        st.success(f"ICA removed components: {ica_info['excluded_components']}")
-                # compute QEEG
-                qeeg, bp = compute_qeeg_features_safe(raw)
-                conn_res = {}
-                if compute_conn:
-                    with st.spinner('Computing connectivity (may be slow)...'):
-                        conn_res = compute_connectivity_final_safe(raw, method=conn_method, fmin=4.0, fmax=30.0, epoch_len=epoch_len, picks=None, mode='fourier', n_jobs=1)
-                        if conn_res.get('error'):
-                            st.warning(f"Connectivity not available: {conn_res.get('error')}")
-                        else:
-                            try:
-                                img = plot_connectivity_heatmap(conn_res['matrix'], conn_res['channels'])
-                                conn_imgs[f.name] = img
-                            except Exception as e:
-                                st.warning(f'Connectivity heatmap failed: {e}')
-                EEG_results['EEG_files'][f.name] = {'bands': bp['abs_mean'], 'relative': bp['rel_mean'], 'QEEG': qeeg, 'connectivity': conn_res}
-                band_png = plot_band_bar(bp['abs_mean'])
-                band_pngs[f.name] = band_png
-                st.image(band_png, caption=f'{f.name} — band powers')
-                if compute_conn and f.name in conn_imgs:
-                    st.image(conn_imgs[f.name], caption=f'{f.name} — connectivity heatmap')
-                # Microstate
-                if run_microstate_per_file and HAS_MNE:
-                    with st.spinner('Running microstate analysis...'):
-                        gfp, times = compute_gfp(raw)
-                        peaks = find_gfp_peaks(gfp, raw.info['sfreq'], min_peak_distance_s=0.02, n_peaks=None)
-                        maps = extract_maps_at_peaks(raw, peaks)
-                        if maps.shape[0] >= micro_k and HAS_SKLEARN:
-                            km, centers = run_microstate_kmeans(maps, micro_k)
-                            labels, corr = assign_microstates_to_samples(raw, centers)
-                            stats = compute_microstate_stats(labels, raw.info['sfreq'], micro_k)
-                            EEG_results['EEG_files'][f.name]['microstates'] = {'centers': centers.tolist(), 'stats': stats}
-                            # simple centers plot
-                            for i, c in enumerate(centers):
-                                fig, ax = plt.subplots(figsize=(6,2))
-                                ax.bar(range(len(c)), c)
-                                ax.set_title(f"{f.name} — Microstate {i+1} center")
-                                buf = io.BytesIO(); plt.tight_layout(); plt.savefig(buf, format='png'); buf.seek(0); plt.close(fig)
-                                micro_imgs[f'{f.name}_ms_{i}'] = buf.getvalue()
-                            # connectivity per microstate (try)
-                            try:
-                                conn_by_state = compute_connectivity_per_microstate(raw, labels, centers, sfreq=raw.info['sfreq'], method=conn_method, fmin=4.0, fmax=30.0, epoch_len=epoch_len)
-                                EEG_results['EEG_files'][f.name]['microstate_connectivity'] = conn_by_state
-                            except Exception as e:
-                                st.warning(f'Microstate connectivity failed: {e}')
-                        else:
-                            st.info('Not enough peaks for microstate clustering or scikit-learn missing.')
-                # model explanation (if model available)
-                feat_vector = [
-                    qeeg.get('Theta_Alpha_ratio', 0.0),
-                    qeeg.get('Theta_Beta_ratio', 0.0),
-                    max([abs(qeeg.get(k,0.0)) for k in qeeg.keys() if k.startswith('alpha_asym_')] + [0.0]),
-                    conn_res.get('mean_connectivity') if conn_res and 'mean_connectivity' in conn_res else 0.0,
-                    patient_info.get('age') if patient_info.get('age') else 60.0
-                ]
-                X_inst = np.array(feat_vector)
-                if MODEL is not None and SCALER is not None:
-                    shap_img = compute_shap_for_instance(MODEL, SCALER, FEATURE_NAMES, X_inst)
-                    if shap_img:
-                        shap_images[f.name] = shap_img
-                # archive file
-                try:
-                    dest = os.path.join(ARCHIVE_DIR, f.name)
-                    with open(dest, 'wb') as dst, open(tmp_name, 'rb') as src:
-                        dst.write(src.read())
-                except Exception:
-                    pass
-                st.success(f'{f.name} processed.')
+                # prepare xai summary (top features)
+                xai_for_pdf = {}
+                if full_summary.get("xai_summary"):
+                    # merge depression and alzheimers if present
+                    if "depression_global" in full_summary["xai_summary"]:
+                        xai_for_pdf = dict(sorted(full_summary["xai_summary"]["depression_global"].items(), key=lambda x:-x[1])[:12])
+                    elif "alzheimers_global" in full_summary["xai_summary"]:
+                        xai_for_pdf = dict(sorted(full_summary["xai_summary"]["alzheimers_global"].items(), key=lambda x:-x[1])[:12])
+                pdf_bytes = generate_professional_pdf(full_summary, lang=lang_choice, shap_local=xai_for_pdf, amiri_path=(amiri_path or None))
+                st.download_button("Download PDF Report", data=pdf_bytes, file_name=f"NeuroEarly_Report_{now_ts()}.pdf", mime="application/pdf")
             except Exception as e:
-                st.error(f'Error processing {f.name}: {e}')
+                st.error("PDF generation failed.")
+                show_traceback(e)
+else:
+    st.info("Process at least one EDF file to enable report generation.")
 
-# PHQ-9 tab
-with tab_phq:
-    st.header(t['phq9'])
-    phq_qs = TEXTS[lang]['phq9_questions']
-    phq_opts = TEXTS[lang]['phq9_options']
-    phq_answers = []
-    ui_opts = phq_opts[:]
-    for i,q in enumerate(phq_qs,1):
-        label = reshape_for_ui(q) if (lang=='ar' and HAS_ARABIC_TOOLS) else q
-        ans = st.selectbox(label, ui_opts, key=f'phq{i}')
-        try:
-            idx = ui_opts.index(ans)
-            num = int(phq_opts[idx].split('=')[0].strip())
-        except Exception:
-            try:
-                num = int(ans.split('=')[0].strip())
-            except Exception:
-                num = 0
-        phq_answers.append(num)
-    phq_score = sum(phq_answers)
-    if phq_score < 5: phq_risk = 'Minimal'
-    elif phq_score < 10: phq_risk = 'Mild'
-    elif phq_score < 15: phq_risk = 'Moderate'
-    elif phq_score < 20: phq_risk = 'Moderately severe'
-    else: phq_risk = 'Severe'
-    st.write(f'PHQ-9 Score: **{phq_score}** → {phq_risk}')
-
-# AD8 tab
-with tab_ad8:
-    st.header(t['ad8'])
-    ad8_qs = TEXTS[lang]['ad8_questions']
-    ad8_opts = TEXTS[lang]['ad8_options']
-    ad8_answers = []
-    for i,q in enumerate(ad8_qs,1):
-        label = reshape_for_ui(q) if (lang=='ar' and HAS_ARABIC_TOOLS) else q
-        ans = st.selectbox(label, ad8_opts, key=f'ad8{i}')
-        try:
-            idx = ad8_opts.index(ans)
-            val = 1 if ad8_opts[idx] == ad8_opts[1] else 0
-        except Exception:
-            val = 0
-        ad8_answers.append(val)
-    ad8_score = sum(ad8_answers); ad8_risk = 'Low' if ad8_score < 2 else 'Possible concern'
-    st.write(f'AD8 Score: **{ad8_score}** → {ad8_risk}')
-
-# Microstates tab (more manual control)
-with tab_micro:
-    st.header(t['microstates'])
-    st.write("Run microstate analysis from Upload tab per file or request integration for batch runs.")
-    st.info("Requires mne & scikit-learn for full functionality.")
-
-# Report tab
-with tab_report:
-    st.header(t['report'])
-    if st.button('Generate'):
-        EEG_results['timestamp'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        EEG_results['Depression'] = {'score': phq_score, 'risk': phq_risk}
-        EEG_results['Alzheimer'] = {'score': ad8_score, 'risk': ad8_risk}
-        interpretations = []
-        risk_scores = {}
-        for fname, block in EEG_results['EEG_files'].items():
-            qi = block.get('QEEG', {})
-            conn = block.get('connectivity', {})
-            # heuristics
-            asym_key = None
-            for k in qi.keys():
-                if k.startswith('alpha_asym_'):
-                    asym_key = k; break
-            if asym_key and qi.get(asym_key) is not None:
-                a = qi[asym_key]
-                if a > 0.2:
-                    interpretations.append(f"{fname}: Left frontal alpha > right — pattern reported in depression studies." if lang=='en' else f"{fname}: اتجاه أعلى لألفا الجبهي الأيسر — مرتبط بدراسات الاكتئاب.")
-                elif a < -0.2:
-                    interpretations.append(f"{fname}: Right frontal alpha > left — notable asymmetry." if lang=='en' else f"{fname}: تفاوت أيسر/أيمن ملحوظ في ألفا.")
-            ta = qi.get('Theta_Alpha_ratio')
-            if ta and ta > 1.2:
-                if lang=='ar':
-                    interpretations.append(f"{fname}: ارتفاع نسبة ثيتا/ألفا ({fmt(ta)}) — قد يشير إلى ضعف إدراكي مبكر؛ يوصى بمتابعة عصبية.")
-                else:
-                    interpretations.append(f"{fname}: Elevated Theta/Alpha ratio ({fmt(ta)}) — may indicate early cognitive decline; recommend neurological follow-up.")
-            conn_summary = {'mean_connectivity': conn.get('mean_connectivity')} if conn and 'mean_connectivity' in conn else {}
-            feat_vector = [
-                qi.get('Theta_Alpha_ratio', 0.0),
-                qi.get('Theta_Beta_ratio', 0.0),
-                max([abs(qi.get(k,0.0)) for k in qi.keys() if k.startswith('alpha_asym_')] + [0.0]),
-                conn_summary.get('mean_connectivity', 0.0),
-                patient_info.get('age') if patient_info.get('age') else 60.0
-            ]
-            X_inst = np.array(feat_vector)
-            if MODEL is not None and SCALER is not None:
-                try:
-                    prob = float(MODEL.predict_proba(SCALER.transform(X_inst.reshape(1,-1)))[0,1] * 100)
-                except Exception:
-                    prob = 0.0
-                risk_scores[fname] = prob
-                if fname in shap_images:
-                    pass
-            else:
-                risk_scores[fname] = 0.0
-        # JSON
-        try:
-            json_bytes = io.BytesIO(json.dumps(EEG_results, indent=2, ensure_ascii=False, default=make_serializable).encode())
-            st.download_button(TEXTS[lang]['download_json'], json_bytes, file_name='report.json')
-        except Exception as e:
-            st.warning(f'JSON export failed: {e}')
-        # CSV
-        try:
-            if EEG_results['EEG_files']:
-                rows=[]
-                for fname, b in EEG_results['EEG_files'].items():
-                    row = {'file': fname}
-                    for k,v in b.get('QEEG', {}).items(): row[k]=v
-                    row['risk_score'] = risk_scores.get(fname, '')
-                    rows.append(row)
-                df = pd.DataFrame(rows)
-                st.download_button(TEXTS[lang]['download_csv'], df.to_csv(index=False).encode('utf-8'), file_name='qeeg_features.csv', mime='text/csv')
-        except Exception as e:
-            st.warning(f'CSV export failed: {e}')
-        # PDF
-        try:
-            pdfb = build_pdf(EEG_results, patient_info, lab_results, meds_list, lang=lang, band_pngs=band_pngs, conn_images=conn_imgs, micro_images=micro_imgs, interpretations=interpretations, risk_scores=risk_scores, shap_images=shap_images)
-            st.download_button(TEXTS[lang]['download_pdf'], pdfb, file_name='report.pdf')
-            st.success('Report generated — downloads ready.')
-        except Exception as e:
-            st.error(f'PDF generation failed: {e}')
-    st.markdown('---')
-    st.info(TEXTS[lang]['note'])
-
-# Model & XAI controls
-with st.expander('Model & XAI (train / upload dataset / view SHAP)'):
-    st.write('Baseline synthetic model AUC:', f"{MODEL_AUC:.3f}" if MODEL_AUC else 'n/a')
-    uploaded_csv = st.file_uploader('Upload CSV with labelled data (Theta_Alpha_ratio,Theta_Beta_ratio,alpha_asym_abs,mean_connectivity,age,label)', type=['csv'])
-    if uploaded_csv and HAS_SKLEARN:
-        try:
-            df = pd.read_csv(uploaded_csv)
-            required = ['Theta_Alpha_ratio','Theta_Beta_ratio','alpha_asym_abs','mean_connectivity','age','label']
-            if not all([c in df.columns for c in required]):
-                st.warning('CSV missing required columns.')
-            else:
-                X = df[required[:-1]].values; y = df['label'].values
-                scaler = StandardScaler(); Xs = scaler.fit_transform(X)
-                clf = RandomForestClassifier(n_estimators=200, random_state=42)
-                clf.fit(Xs, y)
-                auc = roc_auc_score(y, clf.predict_proba(Xs)[:,1])
-                st.success(f'Trained model on uploaded data — AUC (train) = {auc:.3f}')
-                if joblib:
-                    joblib.dump(clf, MODEL_PATH); joblib.dump(scaler, SCALER_PATH); st.info('Model & scaler saved.')
-                MODEL = clf; SCALER = scaler; MODEL_AUC = auc
-        except Exception as e:
-            st.error(f'Model training failed: {e}')
-    st.write('SHAP installed:' , HAS_SHAP)
-    if HAS_SHAP and MODEL is not None:
-        if st.button('Show SHAP summary (synthetic sample)'):
-            Xsamp, _, feat_names = build_synthetic_dataset(200)
-            shap_img = compute_shap_summary_plot(MODEL, SCALER, FEATURE_NAMES, Xsamp)
-            if shap_img:
-                st.image(shap_img, caption='SHAP summary (synthetic sample)')
-
-# EOF
+st.markdown("---")
+st.caption("Designed and developed by Golden Bird LLC — Vista Kaviani  | Muscat, Sultanate of Oman")
+st.caption("Research/demo only — Not a clinical diagnosis. Final clinical decisions must be made by a qualified physician.")
