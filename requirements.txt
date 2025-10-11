@@ -11,3 +11,4 @@ scipy
 shap
 joblib
 pyedflib
+mne-connectivity==0.4.1
