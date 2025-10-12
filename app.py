@@ -928,184 +928,159 @@ if results:
 
 # End of Part 2/3
 # ----------------- Part 3/3: PDF Report Generator, Footer, and Main Run -----------------
-
 from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import inch
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle
+from reportlab.pdfgen import canvas
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from datetime import datetime
+import io
 
-def generate_pdf_report(summary: dict, lang: str = "en", amiri_path: Optional[str] = None,
-                        topo_images: Optional[Dict[str, bytes]] = None,
-                        conn_image: Optional[bytes] = None,
-                        focal_alerts: Optional[List[dict]] = None,
-                        ml_score: Optional[float] = None,
-                        patient_info: Optional[dict] = None) -> bytes:
-    """Generate bilingual clinical report with visuals and metrics."""
+def generate_pdf_report(summary, lang="en", amiri_path=None, output_path=None):
+    """Generate a bilingual clinical report with visuals and metrics."""
     buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=40, bottomMargin=40)
-    styles = getSampleStyleSheet()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=A4, topMargin=40, bottomMargin=40, leftMargin=50, rightMargin=50
+    )
 
-    # Load Amiri font for Arabic or for uniform clean text
-    if amiri_path and Path(amiri_path).exists():
+    # ---- Font ----
+    styles = getSampleStyleSheet()
+    if amiri_path:
         try:
-            pdfmetrics.registerFont(TTFont("Amiri", str(amiri_path)))
-            styles.add(ParagraphStyle(name='Arabic', fontName='Amiri', alignment=2, fontSize=10))
+            pdfmetrics.registerFont(TTFont("Amiri", amiri_path))
+            styles.add(ParagraphStyle(name="Arabic", fontName="Amiri", alignment=2, fontSize=11, leading=16))
         except Exception:
             pass
 
+    title_color = colors.HexColor("#007BFF")  # Light blue tone
+    subtitle_color = colors.HexColor("#0056B3")
+
+    # ---- Title Section ----
     elements = []
-    title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], textColor=colors.HexColor("#0b63d6"), spaceAfter=12)
-    normal = styles["Normal"]
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    # Title
-    elements.append(Paragraph("🧠 NeuroEarly Pro — Clinical EEG Report", title_style))
-    elements.append(Spacer(1, 6))
-
-    # Executive Summary
-    elements.append(Paragraph("<b>Executive Summary</b>", styles['Heading2']))
-    if patient_info:
-        info_txt = f"Patient: {patient_info.get('name','')} | ID: {patient_info.get('id','')} | DOB: {patient_info.get('dob','')}"
-        elements.append(Paragraph(info_txt, normal))
-    if ml_score is not None:
-        elements.append(Paragraph(f"<b>Final ML Risk Score:</b> {ml_score:.1f}%", normal))
-
-    if "theta_alpha_ratio" in summary:
-        elements.append(Paragraph(f"QEEG Interpretation: Theta/Alpha = {summary['theta_alpha_ratio']:.2f}", normal))
-
+    elements.append(Paragraph(
+        "<b><font size=16 color='#007BFF'>NeuroEarly QEEG Report</font></b>", styles["Title"]
+    ))
     elements.append(Spacer(1, 10))
+    elements.append(Paragraph(f"<font size=10 color='#444444'>Generated: {now}</font>", styles["Normal"]))
+    elements.append(Spacer(1, 15))
 
-    # QEEG Key Metrics Table
-    data_table = [["Metric", "Value"]]
-    for k, v in summary.items():
-        data_table.append([k, format_for_pdf_value(v)])
-    table = Table(data_table, colWidths=[2.5*inch, 3.5*inch])
-    table.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#0b63d6")),
-        ('TEXTCOLOR', (0,0), (-1,0), colors.white),
-        ('ALIGN',(0,0),(-1,-1),'LEFT'),
-        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-        ('BOTTOMPADDING',(0,0),(-1,0),6),
-        ('BACKGROUND',(0,1),(-1,-1), colors.whitesmoke),
-        ('GRID',(0,0),(-1,-1),0.25, colors.grey)
-    ]))
-    elements.append(table)
-    elements.append(Spacer(1, 12))
+    # ---- Patient Info ----
+    p_info = summary.get("patient_info", {})
+    if p_info:
+        elements.append(Paragraph("<b>Patient Information</b>", styles["Heading3"]))
+        table_data = [
+            ["Name", p_info.get("name", "—")],
+            ["Age", p_info.get("age", "—")],
+            ["Gender", p_info.get("gender", "—")],
+            ["Medication", ", ".join(p_info.get("medications", [])) if p_info.get("medications") else "—"],
+            ["Conditions", ", ".join(p_info.get("conditions", [])) if p_info.get("conditions") else "—"],
+        ]
+        t = Table(table_data, colWidths=[120, 360])
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.lightblue),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("BOX", (0, 0), (-1, -1), 0.25, colors.gray),
+            ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+            ("FONTSIZE", (0, 0), (-1, -1), 10),
+            ("ALIGN", (0, 0), (-1, -1), "LEFT")
+        ]))
+        elements.append(t)
+        elements.append(Spacer(1, 20))
 
-    # Focal Delta Alerts
-    if focal_alerts:
-        elements.append(Paragraph("<b>Focal Delta / Tumor Indicators:</b>", styles['Heading2']))
-        for al in focal_alerts:
-            if "channel" in al:
-                txt = f"Focal Delta Alert — {al['channel']} : FDI={al['fdi']:.2f}"
-            else:
-                txt = f"Asymmetry {al.get('pair')} ratio={al.get('ratio')}"
-            elements.append(Paragraph(txt, normal))
-        elements.append(Spacer(1, 6))
+    # ---- ML Risk Score ----
+    if "ml_score" in summary:
+        score = summary["ml_score"]
+        color = "#ff4d4d" if score > 60 else "#28a745" if score < 30 else "#ffc107"
+        elements.append(Paragraph("<b>Final ML Risk Score</b>", styles["Heading3"]))
+        elements.append(Paragraph(
+            f"<font color='{color}' size=13><b>{score:.1f}%</b></font> — Overall neurological risk indicator.",
+            styles["Normal"]
+        ))
+        elements.append(Spacer(1, 15))
 
-    # Connectivity Section
-    elements.append(Paragraph("<b>Functional Connectivity:</b>", styles['Heading2']))
-    if conn_image:
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_img:
-            tmp_img.write(conn_image)
-            tmp_img.flush()
-            elements.append(Image(tmp_img.name, width=4.5*inch, height=3.2*inch))
-    else:
-        elements.append(Paragraph("Connectivity data not available.", normal))
-    elements.append(Spacer(1, 6))
+    # ---- Functional Connectivity ----
+    if "connectivity" in summary:
+        conn_val = summary["connectivity"]
+        elements.append(Paragraph("<b>Functional Connectivity</b>", styles["Heading3"]))
+        elements.append(Paragraph(
+            f"Average Connectivity (Coherence/PLI/wPLI): <b>{conn_val:.3f}</b>",
+            styles["Normal"]
+        ))
+        elements.append(Spacer(1, 10))
 
-    # Topomaps
-    if topo_images:
-        elements.append(Paragraph("<b>Topography Maps:</b>", styles['Heading2']))
-        imgs = []
-        for b, img in topo_images.items():
-            if isinstance(img, (bytes, bytearray)):
-                tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-                tmp.write(img)
-                tmp.flush()
-                imgs.append(Image(tmp.name, width=1.5*inch, height=1.5*inch))
-        if imgs:
-            t = Table([imgs])
-            t.setStyle(TableStyle([('ALIGN',(0,0),(-1,-1),'CENTER')]))
-            elements.append(t)
-        elements.append(Spacer(1, 6))
+    # ---- Power Ratios (Theta/Alpha, Alpha Asymmetry) ----
+    if "ratios" in summary:
+        r = summary["ratios"]
+        elements.append(Paragraph("<b>Power Ratios</b>", styles["Heading3"]))
+        elements.append(Paragraph(
+            f"Theta/Alpha Ratio: <b>{r.get('theta_alpha', '—')}</b> | Alpha Asymmetry: <b>{r.get('alpha_asym', '—')}</b>",
+            styles["Normal"]
+        ))
+        elements.append(Spacer(1, 10))
+        # Bar Chart explanation
+        elements.append(Paragraph(
+            "Visual Reference: Healthy (white) vs. Impaired (red). Higher deviation indicates abnormal slowing or asymmetry.",
+            styles["Italic"]
+        ))
+        elements.append(Spacer(1, 10))
 
-    # Medications & Comorbidities
-    if patient_info:
-        elements.append(Paragraph("<b>Current Medications:</b>", styles['Heading2']))
-        meds = patient_info.get("meds","")
-        elements.append(Paragraph(meds if meds else "Not provided.", normal))
-        elements.append(Spacer(1, 6))
-        elements.append(Paragraph("<b>Comorbid Conditions:</b>", styles['Heading2']))
-        cond = patient_info.get("conditions","")
-        elements.append(Paragraph(cond if cond else "Not provided.", normal))
-        elements.append(Spacer(1, 6))
+    # ---- Focal Delta / Tumor Indicators ----
+    if "focal_delta" in summary:
+        fd = summary["focal_delta"]
+        elements.append(Paragraph("<b>Focal Delta Analysis (Tumor Marker)</b>", styles["Heading3"]))
+        elements.append(Paragraph(
+            f"Focal Delta Index: <b>{fd.get('index', '—')}</b> | Asymmetry Ratio: <b>{fd.get('ratio', '—')}</b>",
+            styles["Normal"]
+        ))
+        if fd.get("index", 0) > 2.0 or fd.get("ratio", 0) > 3.0:
+            elements.append(Paragraph(
+                "<font color='red'><b>⚠ Possible focal abnormality detected. Further neuroimaging is advised.</b></font>",
+                styles["Normal"]
+            ))
+        else:
+            elements.append(Paragraph(
+                "<font color='#28a745'>No strong focal delta anomalies detected.</font>",
+                styles["Normal"]
+            ))
+        elements.append(Spacer(1, 10))
 
-    # Structured Clinical Recommendations
-    elements.append(Paragraph("<b>Structured Clinical Recommendations:</b>", styles['Heading2']))
-    recs = [
-        "• Correlate QEEG findings with PHQ-9 and AD8 scores.",
-        "• Check laboratory parameters (Vitamin B12, TSH, Folate) to exclude reversible causes.",
-        "• If ML Risk > 25% and Theta/Alpha > 1.4 → consider MRI or FDG-PET for further evaluation.",
-        "• For moderate risk: re-assessment in 3–6 months recommended."
-    ]
-    for r in recs:
-        elements.append(Paragraph(r, normal))
+    # ---- Gamma Activity ----
+    if "gamma" in summary:
+        g = summary["gamma"]
+        elements.append(Paragraph("<b>Gamma Band (Cognitive Activity)</b>", styles["Heading3"]))
+        elements.append(Paragraph(
+            f"Mean Gamma Power: <b>{g:.3f}</b>. Lower gamma power can relate to reduced cognitive speed.",
+            styles["Normal"]
+        ))
+        elements.append(Spacer(1, 10))
 
-    # Footer
-    elements.append(Spacer(1, 24))
-    footer_txt = "Report generated by NeuroEarly Pro — Designed by Golden Bird LLC © 2025"
-    elements.append(Paragraph(footer_txt, ParagraphStyle('footer', textColor=colors.grey, fontSize=8, alignment=1)))
+    # ---- XAI / Model Explanation ----
+    if "xai" in summary:
+        elements.append(Paragraph("<b>Model Explainability (XAI)</b>", styles["Heading3"]))
+        elements.append(Paragraph(
+            "The model highlights key EEG features influencing prediction — such as connectivity loss and spectral slowing.",
+            styles["Normal"]
+        ))
+        elements.append(Spacer(1, 15))
+
+    # ---- Footer ----
+    elements.append(Spacer(1, 25))
+    elements.append(Paragraph(
+        "<font color='#007BFF'><b>Report designed and generated by Golden Bird LLC — NeuroEarly AI System.</b></font>",
+        styles["Italic"]
+    ))
 
     doc.build(elements)
-    pdf_bytes = buffer.getvalue()
+    pdf = buffer.getvalue()
     buffer.close()
-    return pdf_bytes
 
+    if output_path:
+        with open(output_path, "wb") as f:
+            f.write(pdf)
 
-# --- PDF Generation & Download Button ---
-if results:
-    st.markdown("---")
-    st.header("Generate Clinical PDF Report")
-    report_lang = lang
-    patient_info = {
-        "name": patient_name,
-        "id": patient_id,
-        "dob": str(dob),
-        "meds": meds,
-        "conditions": conditions
-    }
-    if st.button("Generate PDF"):
-        try:
-            r0 = results[0]
-            pdfb = generate_pdf_report(
-                r0["agg_features"],
-                lang=report_lang,
-                amiri_path=str(AMIRI_TTF) if AMIRI_TTF.exists() else None,
-                topo_images=r0.get("topo_images"),
-                conn_image=r0.get("connectivity_image"),
-                focal_alerts=r0.get("focal", {}).get("focal_alerts"),
-                ml_score=ml_risk,
-                patient_info=patient_info
-            )
-            st.success("PDF report generated successfully.")
-            st.download_button("Download Report (PDF)", data=pdfb,
-                               file_name=f"NeuroEarly_Report_{now_ts()}.pdf", mime="application/pdf")
-        except Exception as e:
-            _trace(e)
-
-# --- Sidebar Enhancement: show entered meds and comorbidities ---
-with st.sidebar:
-    st.markdown("---")
-    st.subheader("🩺 Summary")
-    if meds.strip():
-        st.markdown("**Medications:**")
-        for line in meds.split("\n"):
-            st.markdown(f"- {line}")
-    if conditions.strip():
-        st.markdown("**Comorbidities:**")
-        for line in conditions.split("\n"):
-            st.markdown(f"- {line}")
-    st.markdown("---")
-    st.caption("Report generated by Golden Bird LLC • 2025")
-
-# END OF APP
+    return pdf
