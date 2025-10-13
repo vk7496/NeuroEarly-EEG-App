@@ -782,18 +782,22 @@ if uploads and st.button("Process uploaded EDF(s)"):
                     except Exception as e:
                         print("conn image failed:", e)
 
-            results.append({
-                "filename": up.name,
-                "agg_features": agg,
-                "df_bands": dfbands,
-                "topo_images": topo_imgs,
-                "connectivity_matrix": conn_mat,
-                "connectivity_narrative": conn_narr,
-                "connectivity_image": conn_img,
-                "focal": focal,
-                "raw_sf": sf,
-                "ch_names": ch_names
-            })
+            # ===== Store EEG and clinical metrics for PDF report =====
+st.session_state["theta_alpha_ratio"] = theta_alpha_ratio if "theta_alpha_ratio" in locals() else None
+st.session_state["alpha_asymmetry"] = alpha_asymmetry if "alpha_asymmetry" in locals() else None
+st.session_state["mean_connectivity"] = mean_connectivity if "mean_connectivity" in locals() else None
+st.session_state["focal_delta_index"] = focal_delta_index if "focal_delta_index" in locals() else None
+st.session_state["focal_delta_ratio"] = focal_delta_ratio if "focal_delta_ratio" in locals() else None
+st.session_state["mean_gamma"] = mean_gamma_power if "mean_gamma_power" in locals() else None
+st.session_state["ml_score"] = ml_risk_score if "ml_risk_score" in locals() else None
+
+# store patient info for report
+st.session_state["patient_name"] = patient_name
+st.session_state["patient_age"] = patient_age
+st.session_state["patient_gender"] = patient_gender
+st.session_state["patient_meds"] = selected_medications
+st.session_state["patient_conditions"] = selected_conditions
+
             processing_placeholder.success(f"Processed {up.name}")
         except Exception as e:
             processing_placeholder.error(f"Failed processing {up.name}: {e}")
