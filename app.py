@@ -1084,3 +1084,45 @@ def generate_pdf_report(summary, lang="en", amiri_path=None, output_path=None):
             f.write(pdf)
 
     return pdf
+# -------------------- Streamlit PDF Export Section --------------------
+st.markdown("---")
+st.subheader("📄 Generate Clinical PDF Report")
+
+# جمع‌آوری خلاصه داده‌ها برای گزارش
+summary = {
+    "patient_info": {
+        "name": st.session_state.get("patient_name", "Unknown"),
+        "age": st.session_state.get("patient_age", "—"),
+        "gender": st.session_state.get("patient_gender", "—"),
+        "medications": st.session_state.get("patient_meds", []),
+        "conditions": st.session_state.get("patient_conditions", [])
+    },
+    "ml_score": st.session_state.get("ml_score", 0),
+    "connectivity": st.session_state.get("mean_connectivity", 0.0),
+    "ratios": {
+        "theta_alpha": st.session_state.get("theta_alpha_ratio", 0.0),
+        "alpha_asym": st.session_state.get("alpha_asymmetry", 0.0)
+    },
+    "focal_delta": {
+        "index": st.session_state.get("focal_delta_index", 0.0),
+        "ratio": st.session_state.get("focal_delta_ratio", 0.0)
+    },
+    "gamma": st.session_state.get("mean_gamma", 0.0),
+    "xai": st.session_state.get("xai_summary", {}),
+}
+
+amiri_font_path = "fonts/Amiri-Regular.ttf"  # مسیر فونت
+
+if st.button("📘 Generate PDF Report"):
+    try:
+        pdf_bytes = generate_pdf_report(summary, lang=lang, amiri_path=amiri_font_path)
+        st.success("✅ PDF report generated successfully!")
+
+        st.download_button(
+            label="⬇️ Download Clinical Report (PDF)",
+            data=pdf_bytes,
+            file_name=f"NeuroEarly_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+            mime="application/pdf"
+        )
+    except Exception as e:
+        st.error(f"⚠️ Error generating report: {e}")
