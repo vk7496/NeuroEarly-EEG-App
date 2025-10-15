@@ -769,20 +769,35 @@ if uploads and st.button("Process uploaded EDF(s)"):
                     img = generate_topomap_image(vals, ch_names=ch_names, band_name=band)
                     topo_imgs[band] = img
             # connectivity
-            conn_mat = None; conn_narr = None; conn_img = None
-            if do_connectivity:
-                conn_mat, conn_narr = compute_connectivity_matrix(cleaned, sf, ch_names=ch_names, band=BANDS.get("Alpha",(8.0,13.0)))
-                if conn_mat is not None and HAS_MATPLOTLIB:
-                    try:
-                        fig = plt.figure(figsize=(4,3)); ax = fig.add_subplot(111)
-                        im = ax.imshow(conn_mat, cmap='viridis'); fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-                        ax.set_title("Connectivity (Alpha)")
-                        buf = io.BytesIO(); fig.tight_layout(); fig.savefig(buf, format='png'); plt.close(fig); buf.seek(0)
-                        conn_img = buf.getvalue()
-                    except Exception as e:
-                        print("conn image failed:", e)
-            # ===== Store EEG and clinical metrics for PDF report =====
-st.session_state["theta_alpha_ratio"] = theta_alpha_ratio if "theta_alpha_ratio" in locals() else None
+            # --- Connectivity computation ---
+conn_mat = None
+conn_narr = None
+conn_img = None
+
+if do_connectivity:
+    conn_mat, conn_narr = compute_connectivity_matrix(
+        cleaned, sf, ch_names=ch_names, band=BANDS.get("Alpha", (8.0, 13.0))
+    )
+    if conn_mat is not None and HAS_MATPLOTLIB:
+        try:
+            fig = plt.figure(figsize=(4,3))
+            ax = fig.add_subplot(111)
+            im = ax.imshow(conn_mat, cmap='viridis')
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            ax.set_title("Connectivity (Alpha)")
+            buf = io.BytesIO()
+            fig.tight_layout()
+            fig.savefig(buf, format='png')
+            plt.close(fig)
+            buf.seek(0)
+            conn_img = buf.getvalue()
+        except Exception as e:
+            print("conn image failed:", e)
+
+# ===== Store EEG and clinical metrics for PDF report =====
+st.session_state["theta_alpha_ratio"] = (
+    theta_alpha_ratio if "theta_alpha_ratio" in locals() else None
+)
 st.session_state["alpha_asymmetry"] = alpha_asymmetry if "alpha_asymmetry" in locals() else None
 st.session_state["mean_connectivity"] = mean_connectivity if "mean_connectivity" in locals() else None
 st.session_state["focal_delta_index"] = focal_delta_index if "focal_delta_index" in locals() else None
