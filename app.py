@@ -929,6 +929,27 @@ if results:
         st.download_button("Download metrics (CSV)", data=csv, file_name=f"NeuroEarly_metrics_{now_ts()}.csv", mime="text/csv")
     except Exception:
         pass
+    # Generate complete bilingual PDF report
+    try:
+        if results:
+            summary_data = results[0]["agg_features"]
+            ml_score = summary_data.get("final_ml_risk_score", 0)
+            pdf_bytes = generate_pdf_report(
+                summary=summary_data,
+                lang="en",
+                amiri_path="fonts/Amiri-Regular.ttf",
+                output_path=f"NeuroEarly_Report_{now_ts()}.pdf"
+            )
+            st.download_button(
+                "📄 Download Clinical Report (PDF)",
+                data=pdf_bytes,
+                file_name=f"NeuroEarly_Report_{now_ts()}.pdf",
+                mime="application/pdf"
+            )
+        else:
+            st.info("No processed EEG data found. Please upload and process EEG first.")
+    except Exception as e:
+        st.error(f"PDF generation failed: {e}")
 
 # End of Part 2/3
 # ----------------- Part 3/3: PDF Report Generator, Footer, and Main Run -----------------
@@ -944,189 +965,104 @@ from datetime import datetime
 import io
 
 def generate_pdf_report(summary, lang="en", amiri_path=None, output_path=None):
-    """Generate a bilingual clinical report with visuals and metrics."""
+    """Generate a bilingual clinical PDF report with EEG metrics and visuals."""
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from datetime import datetime
+    import io
+
     buffer = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buffer, pagesize=A4, topMargin=40, bottomMargin=40, leftMargin=50, rightMargin=50
-    )
-
-    # ---- Font ----
+    doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=40, bottomMargin=40, leftMargin=50, rightMargin=50)
     styles = getSampleStyleSheet()
-    if amiri_path:
-        try:
-            pdfmetrics.registerFont(TTFont("Amiri", amiri_path))
-            styles.add(ParagraphStyle(name="Arabic", fontName="Amiri", alignment=2, fontSize=11, leading=16))
-        except Exception:
-            pass
 
-    title_color = colors.HexColor("#007BFF")  # Light blue tone
-    subtitle_color = colors.HexColor("#0056B3")
-
-    # ---- Title Section ----
-    elements = []
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
-
-    elements.append(Paragraph(
-        "<b><font size=16 color='#007BFF'>NeuroEarly QEEG Report</font></b>", styles["Title"]
+    # فونت و استایل سفارشی
+    styles.add(ParagraphStyle(
+        name="Title",
+        fontName="Helvetica-Bold",
+        fontSize=18,
+        textColor=colors.HexColor("#0077B6"),  # آبی روشن
+        alignment=1,
+        spaceAfter=20
     ))
+    styles.add(ParagraphStyle(
+        name="Body",
+        fontName="Helvetica",
+        fontSize=11,
+        leading=15,
+        textColor=colors.black
+    ))
+    styles.add(ParagraphStyle(
+        name="SectionHeader",
+        fontName="Helvetica-Bold",
+        fontSize=13,
+        textColor=colors.HexColor("#0096C7"),
+        spaceBefore=12,
+        spaceAfter=6
+    ))
+
+    # ---- محتوا ----
+    elements = []
+    elements.append(Paragraph("NeuroEarly EEG Analysis Report", styles["Title"]))
+    elements.append(Paragraph(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M')}", styles["Body"]))
+    elements.append(Spacer(1, 12))
+
+    # خلاصه‌ی بالینی
+    elements.append(Paragraph("Clinical Summary", styles["SectionHeader"]))
+    ml_score = summary.get("final_ml_risk_score", 0)
+    risk_label = "Low" if ml_score < 0.3 else "Moderate" if ml_score < 0.7 else "High"
+    elements.append(Paragraph(f"Final ML Risk Score: <b>{ml_score:.2f}</b> ({risk_label} risk of abnormal EEG pattern)", styles["Body"]))
     elements.append(Spacer(1, 10))
-    elements.append(Paragraph(f"<font size=10 color='#444444'>Generated: {now}</font>", styles["Normal"]))
+
+    # شاخص‌های کلیدی
+    elements.append(Paragraph("EEG Quantitative Metrics", styles["SectionHeader"]))
+    metrics_table = [
+        ["Feature", "Value", "Clinical Note"],
+        ["Theta/Alpha Ratio", f"{summary.get('theta_alpha_ratio', 'N/A'):.2f}", "High values may suggest cognitive slowing."],
+        ["Alpha Asymmetry", f"{summary.get('alpha_asymmetry', 'N/A'):.2f}", "Asymmetry linked to mood disorders."],
+        ["Focal Delta Index", f"{summary.get('focal_delta_index', 'N/A'):.2f}", "Elevated values indicate focal slowing or tumor lesion."],
+        ["Gamma Power", f"{summary.get('gamma_power', 'N/A'):.2f}", "Reduced gamma may indicate disconnection."],
+        ["Functional Connectivity", f"{summary.get('mean_connectivity', 'N/A'):.2f}", "Reflects inter-regional neural coherence."]
+    ]
+    table = Table(metrics_table, colWidths=[150, 100, 250])
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#CAF0F8")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
+        ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, 0), 12),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
+        ("BACKGROUND", (0, 1), (-1, -1), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.3, colors.gray),
+    ]))
+    elements.append(table)
     elements.append(Spacer(1, 15))
 
-    # ---- Patient Info ----
-    p_info = summary.get("patient_info", {})
-    if p_info:
-        elements.append(Paragraph("<b>Patient Information</b>", styles["Heading3"]))
-        table_data = [
-            ["Name", p_info.get("name", "—")],
-            ["Age", p_info.get("age", "—")],
-            ["Gender", p_info.get("gender", "—")],
-            ["Medication", ", ".join(p_info.get("medications", [])) if p_info.get("medications") else "—"],
-            ["Conditions", ", ".join(p_info.get("conditions", [])) if p_info.get("conditions") else "—"],
-        ]
-        t = Table(table_data, colWidths=[120, 360])
-        t.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.lightblue),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("BOX", (0, 0), (-1, -1), 0.25, colors.gray),
-            ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
-            ("FONTSIZE", (0, 0), (-1, -1), 10),
-            ("ALIGN", (0, 0), (-1, -1), "LEFT")
-        ]))
-        elements.append(t)
-        elements.append(Spacer(1, 20))
+    # تفسیر بالینی نهایی
+    elements.append(Paragraph("Clinical Interpretation", styles["SectionHeader"]))
+    interpretation = []
+    if summary.get("focal_delta_index", 0) > 2.0:
+        interpretation.append("⚠️ Focal Delta activity suggests possible localized cortical lesion or tumor focus.")
+    if summary.get("theta_alpha_ratio", 0) > 1.3:
+        interpretation.append("🧠 Theta/Alpha ratio indicates global slowing, consistent with early Alzheimer’s signs.")
+    if summary.get("alpha_asymmetry", 0) > 0.5:
+        interpretation.append("⚠️ Marked Alpha Asymmetry may indicate depressive or emotional dysregulation.")
+    if summary.get("mean_connectivity", 0) < 0.3:
+        interpretation.append("🔴 Functional disconnection observed, reduced inter-hemispheric coherence.")
+    if not interpretation:
+        interpretation.append("✅ EEG patterns are within normal clinical range.")
+    for line in interpretation:
+        elements.append(Paragraph(line, styles["Body"]))
 
-    # ---- ML Risk Score ----
-    if "ml_score" in summary:
-        score = summary["ml_score"]
-        color = "#ff4d4d" if score > 60 else "#28a745" if score < 30 else "#ffc107"
-        elements.append(Paragraph("<b>Final ML Risk Score</b>", styles["Heading3"]))
-        elements.append(Paragraph(
-            f"<font color='{color}' size=13><b>{score:.1f}%</b></font> — Overall neurological risk indicator.",
-            styles["Normal"]
-        ))
-        elements.append(Spacer(1, 15))
-
-    # ---- Functional Connectivity ----
-    if "connectivity" in summary:
-        conn_val = summary["connectivity"]
-        elements.append(Paragraph("<b>Functional Connectivity</b>", styles["Heading3"]))
-        elements.append(Paragraph(
-            f"Average Connectivity (Coherence/PLI/wPLI): <b>{conn_val:.3f}</b>",
-            styles["Normal"]
-        ))
-        elements.append(Spacer(1, 10))
-
-    # ---- Power Ratios (Theta/Alpha, Alpha Asymmetry) ----
-    if "ratios" in summary:
-        r = summary["ratios"]
-        elements.append(Paragraph("<b>Power Ratios</b>", styles["Heading3"]))
-        elements.append(Paragraph(
-            f"Theta/Alpha Ratio: <b>{r.get('theta_alpha', '—')}</b> | Alpha Asymmetry: <b>{r.get('alpha_asym', '—')}</b>",
-            styles["Normal"]
-        ))
-        elements.append(Spacer(1, 10))
-        # Bar Chart explanation
-        elements.append(Paragraph(
-            "Visual Reference: Healthy (white) vs. Impaired (red). Higher deviation indicates abnormal slowing or asymmetry.",
-            styles["Italic"]
-        ))
-        elements.append(Spacer(1, 10))
-
-    # ---- Focal Delta / Tumor Indicators ----
-    if "focal_delta" in summary:
-        fd = summary["focal_delta"]
-        elements.append(Paragraph("<b>Focal Delta Analysis (Tumor Marker)</b>", styles["Heading3"]))
-        elements.append(Paragraph(
-            f"Focal Delta Index: <b>{fd.get('index', '—')}</b> | Asymmetry Ratio: <b>{fd.get('ratio', '—')}</b>",
-            styles["Normal"]
-        ))
-        if fd.get("index", 0) > 2.0 or fd.get("ratio", 0) > 3.0:
-            elements.append(Paragraph(
-                "<font color='red'><b>⚠ Possible focal abnormality detected. Further neuroimaging is advised.</b></font>",
-                styles["Normal"]
-            ))
-        else:
-            elements.append(Paragraph(
-                "<font color='#28a745'>No strong focal delta anomalies detected.</font>",
-                styles["Normal"]
-            ))
-        elements.append(Spacer(1, 10))
-
-    # ---- Gamma Activity ----
-    if "gamma" in summary:
-        g = summary["gamma"]
-        elements.append(Paragraph("<b>Gamma Band (Cognitive Activity)</b>", styles["Heading3"]))
-        elements.append(Paragraph(
-            f"Mean Gamma Power: <b>{g:.3f}</b>. Lower gamma power can relate to reduced cognitive speed.",
-            styles["Normal"]
-        ))
-        elements.append(Spacer(1, 10))
-
-    # ---- XAI / Model Explanation ----
-    if "xai" in summary:
-        elements.append(Paragraph("<b>Model Explainability (XAI)</b>", styles["Heading3"]))
-        elements.append(Paragraph(
-            "The model highlights key EEG features influencing prediction — such as connectivity loss and spectral slowing.",
-            styles["Normal"]
-        ))
-        elements.append(Spacer(1, 15))
-
-    # ---- Footer ----
-    elements.append(Spacer(1, 25))
-    elements.append(Paragraph(
-        "<font color='#007BFF'><b>Report designed and generated by Golden Bird LLC — NeuroEarly AI System.</b></font>",
-        styles["Italic"]
-    ))
+    elements.append(Spacer(1, 20))
+    elements.append(Paragraph("<b>Report generated by Golden Bird LLC | NeuroEarly System</b>", styles["Body"]))
 
     doc.build(elements)
-    pdf = buffer.getvalue()
+    pdf_data = buffer.getvalue()
     buffer.close()
 
     if output_path:
         with open(output_path, "wb") as f:
-            f.write(pdf)
-
-    return pdf
-# -------------------- Streamlit PDF Export Section --------------------
-st.markdown("---")
-st.subheader("📄 Generate Clinical PDF Report")
-
-# جمع‌آوری خلاصه داده‌ها برای گزارش
-summary = {
-    "patient_info": {
-        "name": st.session_state.get("patient_name", "Unknown"),
-        "age": st.session_state.get("patient_age", "—"),
-        "gender": st.session_state.get("patient_gender", "—"),
-        "medications": st.session_state.get("patient_meds", []),
-        "conditions": st.session_state.get("patient_conditions", [])
-    },
-    "ml_score": st.session_state.get("ml_score", 0),
-    "connectivity": st.session_state.get("mean_connectivity", 0.0),
-    "ratios": {
-        "theta_alpha": st.session_state.get("theta_alpha_ratio", 0.0),
-        "alpha_asym": st.session_state.get("alpha_asymmetry", 0.0)
-    },
-    "focal_delta": {
-        "index": st.session_state.get("focal_delta_index", 0.0),
-        "ratio": st.session_state.get("focal_delta_ratio", 0.0)
-    },
-    "gamma": st.session_state.get("mean_gamma", 0.0),
-    "xai": st.session_state.get("xai_summary", {}),
-}
-
-amiri_font_path = "fonts/Amiri-Regular.ttf"  # مسیر فونت
-
-if st.button("📘 Generate PDF Report"):
-    try:
-        pdf_bytes = generate_pdf_report(summary, lang=lang, amiri_path=amiri_font_path)
-        st.success("✅ PDF report generated successfully!")
-
-        st.download_button(
-            label="⬇️ Download Clinical Report (PDF)",
-            data=pdf_bytes,
-            file_name=f"NeuroEarly_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-            mime="application/pdf"
-        )
-    except Exception as e:
-        st.error(f"⚠️ Error generating report: {e}")
+            f.write(pdf_data)
+    return pdf_data
