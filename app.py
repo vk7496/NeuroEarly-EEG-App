@@ -781,7 +781,6 @@ if uploads and st.button("Process uploaded EDF(s)"):
                         conn_img = buf.getvalue()
                     except Exception as e:
                         print("conn image failed:", e)
-
             # ===== Store EEG and clinical metrics for PDF report =====
 st.session_state["theta_alpha_ratio"] = theta_alpha_ratio if "theta_alpha_ratio" in locals() else None
 st.session_state["alpha_asymmetry"] = alpha_asymmetry if "alpha_asymmetry" in locals() else None
