@@ -17,6 +17,11 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+# ================= Language Selection =================
+LANGUAGES = {"English": "en", "Arabic": "ar"}
+selected_lang = st.sidebar.radio("Select Language", options=list(LANGUAGES.keys()), index=0)
+lang = LANGUAGES[selected_lang]
+
 # Optional heavy libs with graceful fallback
 HAS_MNE = False
 HAS_PYEDF = False
