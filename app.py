@@ -356,10 +356,11 @@ story.append(Spacer(1, 8))
 
     # bar img
     if summary.get("bar_img"):
-        try:
-            story.append(Paragraph("<b>Power Ratios Comparison</b>", styles["H2"]))
-            story.append(RLImage(io.BytesIO(summary["bar_img"]), width=5.6*inch, height=1.4*inch))
-            story.append(Spacer(1,6))
+    story.append(Paragraph("Normative Comparison", styles["H2"]))
+    story.append(Spacer(1, 0.15*inch))
+    img = Image(io.BytesIO(summary["bar_img"]), width=5.5*inch, height=3.0*inch)
+    story.append(img)
+    story.append(Spacer(1, 0.3*inch))
         except Exception:
             pass
     # topomaps
