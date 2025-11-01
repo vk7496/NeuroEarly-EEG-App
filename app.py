@@ -409,9 +409,9 @@ except Exception:
     story.append(Paragraph("Prepared by Golden Bird LLC — NeuroEarly Pro", styles["Note"]))
     story.append(Spacer(1,18))
     story.append(Paragraph("Doctor signature: ___________________________", styles["Body"]))
-        doc.build(story)
-        buffer.seek(0)
-        return buffer.getvalue()
+    doc.build(story)
+    buffer.seek(0)
+   return buffer.getvalue()
 
 
 # ---------------- Streamlit UI ----------------
