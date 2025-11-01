@@ -411,7 +411,7 @@ st.markdown(f"""
  <div style="font-weight:700;color:{BLUE};font-size:18px;">🧠 NeuroEarly Pro — Clinical AI</div>
  <div style="display:flex;align-items:center;">
    <div style="font-size:12px;color:#333;margin-right:10px;">Prepared by Golden Bird LLC</div>
-   {'<img src="assets/GoldenBird_logo." style="height:40px;">' if Path(LOGO_PATH).exists() else ''}
+   {'<img src="assets/goldenbird_logo.png" style="height:40px;">' if Path(LOGO_PATH).exists() else ''}
  </div>
 </div>
 """, unsafe_allow_html=True)
