@@ -346,8 +346,14 @@ def generate_pdf_report(summary:Dict[str,Any], lang="en", amiri_path:Optional[st
     for k,v in metrics.items():
         try: rows.append([str(k), f"{float(v):.4f}"])
         except: rows.append([str(k), str(v)])
-    t2=Table(rows, colWidths=[3.5*inch,2.5*inch]); t2.setStyle(TableStyle([("GRID",(0,0),(-1,-1),0.25,colors.grey),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#eef7ff")])) 
-    story.append(t2); story.append(Spacer(1,8))
+    t2 = Table(rows, colWidths=[3.5*inch, 2.5*inch])
+t2.setStyle(TableStyle([
+    ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eef7ff"))
+]))
+story.append(t2)
+story.append(Spacer(1, 8))
+
     # bar img
     if summary.get("bar_img"):
         try:
