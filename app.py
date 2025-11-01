@@ -411,9 +411,9 @@ except Exception:
     story.append(Paragraph("Doctor signature: ___________________________", styles["Body"]))
     doc.build(story)
     buffer.seek(0)
-   return buffer.getvalue()
+    return buffer.getvalue()
 
-
+    
 # ---------------- Streamlit UI ----------------
 st.set_page_config(page_title="NeuroEarly Pro — Clinical", layout="wide")
 st.markdown(f"""
