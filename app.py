@@ -361,7 +361,7 @@ if summary.get("bar_img"):
     img = Image(io.BytesIO(summary["bar_img"]), width=5.5*inch, height=3.0*inch)
     story.append(img)
     story.append(Spacer(1, 0.3*inch))
-except Exception:
+    except Exception:
     pass
 
     # topomaps
