@@ -355,13 +355,14 @@ story.append(t2)
 story.append(Spacer(1, 8))
 
     # bar img
-if summary.get("bar_img"):
-    story.append(Paragraph("Normative Comparison", styles["H2"]))
-    story.append(Spacer(1, 0.15*inch))
-    img = Image(io.BytesIO(summary["bar_img"]), width=5.5*inch, height=3.0*inch)
-    story.append(img)
-    story.append(Spacer(1, 0.3*inch))
-    except Exception:
+try:
+    if summary.get("bar_img"):
+        story.append(Paragraph("Normative Comparison", styles["H2"]))
+        story.append(Spacer(1, 0.15*inch))
+        img = Image(io.BytesIO(summary["bar_img"]), width=5.5*inch, height=3.0*inch)
+        story.append(img)
+        story.append(Spacer(1, 0.3*inch))
+except Exception:
     pass
 
     # topomaps
