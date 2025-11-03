@@ -117,20 +117,25 @@ def fmt(x, prec=4):
 # ---------------------------
 def read_edf_bytes(uploaded) -> Tuple[Optional[mne.io.Raw], Optional[str]]:
     """
-    Try reading uploaded EDF using mne if available, else return None.
+    Reads uploaded EDF safely using a temporary file.
     Returns (raw, msg)
     """
     if not uploaded:
-        return None, "No file"
-    buf = io.BytesIO(uploaded.getvalue())
+        return None, "No file uploaded"
+
     try:
-        if HAS_MNE:
-            raw = mne.io.read_raw_edf(buf, preload=True, verbose=False)
-            return raw, None
-        else:
-            return None, "mne not available"
+        # ✅ Create temporary file for mne
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".edf") as tmp:
+            tmp.write(uploaded.getbuffer())
+            tmp_path = tmp.name
+
+        # ✅ Read EDF using mne
+        raw = mne.io.read_raw_edf(tmp_path, preload=True, verbose=False)
+        return raw, None
+
     except Exception as e:
-        return None, str(e)
+        return None, f"Error reading EDF: {e}"
+
 
 def compute_band_powers(raw, bands=BANDS):
     """
