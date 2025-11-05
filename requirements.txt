@@ -1,20 +1,31 @@
+# ===== Core UI =====
 streamlit==1.50.0
+altair==5.5.0
+protobuf==5.27.2  # ✅ stable for Streamlit Cloud
+
+# ===== Data Science =====
+numpy==1.26.4     # ✅ fully compatible with matplotlib & shap
+pandas==2.2.2
+scipy==1.13.1
+scikit-learn==1.5.2
+joblib==1.4.2
+tqdm==4.66.5
+
+# ===== EEG / Neuro =====
 mne==1.10.1
-pyedflib==0.1.42
-numpy==2.2.2
-scipy==1.16.2
-matplotlib==3.10.7
-pandas==2.3.3
-scikit-learn==1.7.2
-shap==0.48.0
-reportlab==4.4.4
+pyedflib==0.1.34  # ✅ lighter, cloud-safe build
+
+# ===== Visualization =====
+matplotlib==3.9.2
+shap==0.45.1
+Pillow==10.4.0
+
+# ===== PDF + Arabic =====
+reportlab==4.2.5
 arabic-reshaper==3.0.0
 python-bidi==0.6.6
-altair==5.5.0
-joblib==1.5.2
-tqdm==4.67.1
-requests==2.32.5
-Pillow==11.3.0
-protobuf==6.0.0
-jsonschema==4.25.1
-gitpython==3.1.45
+
+# ===== Utility =====
+requests==2.32.3
+jsonschema==4.22.0
+gitpython==3.1.43
