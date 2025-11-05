@@ -1,31 +1,57 @@
-# ===== Core UI =====
-streamlit==1.50.0
-altair==5.5.0
-protobuf==5.27.2  # ✅ stable for Streamlit Cloud
+################################################################################
+# NeuroEarly Pro — Clinical & Research AI App
+# Author: Vista Kaviani | Golden Bird LLC
+# Description: Streamlit-based EEG/Clinical Diagnostic Dashboard (English/Arabic)
+################################################################################
 
-# ===== Data Science =====
-numpy==1.26.4     # ✅ fully compatible with matplotlib & shap
-pandas==2.2.2
-scipy==1.13.1
-scikit-learn==1.5.2
-joblib==1.4.2
-tqdm==4.66.5
+# ────────────────────────────────
+# 🧠 Core UI Framework
+# ────────────────────────────────
+streamlit==1.50.0            # Web app framework
+altair==5.5.0                # Chart rendering
+protobuf==5.27.2             # Stable version for Streamlit Cloud
 
-# ===== EEG / Neuro =====
-mne==1.10.1
-pyedflib==0.1.34  # ✅ lighter, cloud-safe build
+# ────────────────────────────────
+# 🧩 Scientific Libraries
+# ────────────────────────────────
+numpy==1.26.4                # Matrix operations (EEG signal arrays)
+pandas==2.2.2                # Tabular data for reports
+scipy==1.13.1                # Signal processing & filtering
+scikit-learn==1.5.2          # Machine learning models
+joblib==1.4.2                # Model serialization
+tqdm==4.66.5                 # Progress bars
 
-# ===== Visualization =====
-matplotlib==3.9.2
-shap==0.45.1
-Pillow==10.4.0
+# ────────────────────────────────
+# ⚡ EEG / Neuro Modules
+# ────────────────────────────────
+mne==1.10.1                  # EEG/MEG neuroimaging library
+pyedflib==0.1.34             # EDF file reader (lightweight, cloud-safe)
 
-# ===== PDF + Arabic =====
-reportlab==4.2.5
-arabic-reshaper==3.0.0
-python-bidi==0.6.6
+# ────────────────────────────────
+# 🎨 Visualization / Explainable AI
+# ────────────────────────────────
+matplotlib==3.9.2            # Topographic & band power plots
+shap==0.45.1                 # Explainable AI model interpretation
+Pillow==10.4.0               # Image processing for PDF & charts
 
-# ===== Utility =====
-requests==2.32.3
-jsonschema==4.22.0
-gitpython==3.1.43
+# ────────────────────────────────
+# 🕌 Arabic / Multilingual PDF Support
+# ────────────────────────────────
+reportlab==4.2.5             # PDF generation engine
+arabic-reshaper==3.0.0       # Arabic font reshaping
+python-bidi==0.6.6           # Right-to-left text rendering
+
+# ────────────────────────────────
+# 🔧 Utilities & Connectivity
+# ────────────────────────────────
+requests==2.32.3             # HTTP requests (API connectivity)
+jsonschema==4.22.0           # Data validation
+gitpython==3.1.43            # Version tracking & deployment notes
+
+################################################################################
+# ✅ Notes:
+# - Compatible with Streamlit Cloud (Linux x86_64 environment)
+# - Recommended Python version: 3.11.x
+# - Avoid upgrading NumPy or Protobuf beyond listed versions for stability
+# - Fonts (Amiri-Regular.ttf) should reside in project root or /assets
+################################################################################
