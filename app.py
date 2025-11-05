@@ -126,25 +126,28 @@ def fmt(x, prec=4):
 # -------------------------
 # Safe EDF read (temp file)
 # -------------------------
-def read_edf_bytes(uploaded) -> Tuple[Optional["mne.io.Raw"], Optional[str]]:
-    """
-    Read uploaded EDF safely by writing to a temporary file and calling mne with the path.
-    Returns (raw, error_msg)
-    """
+def read_edf_bytes(uploaded) -> Tuple[Optional[mne.io.Raw], Optional[str]]:
+    """Safely read EDF file and handle temp storage errors."""
     if not uploaded:
         return None, "No file uploaded"
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".edf") as tmp:
-            tmp.write(uploaded.getbuffer())
-            tmp_path = tmp.name
+        # ذخیره موقت فایل روی دیسک برای سازگاری با mne
+        tmp_path = Path(tempfile.gettempdir()) / f"tmp_eeg_{datetime.now().timestamp()}.edf"
+        with open(tmp_path, "wb") as f:
+            f.write(uploaded.getvalue())
+
         if HAS_MNE:
             raw = mne.io.read_raw_edf(tmp_path, preload=True, verbose=False)
-            raw.info["__tmp_edf_path__"] = tmp_path
+            # اضافه‌کردن مسیر موقت به info در بخش temp مجاز
+            if "temp" not in raw.info:
+                raw.info["temp"] = {}
+            raw.info["temp"]["edf_path"] = str(tmp_path)
             return raw, None
         else:
-            return None, "MNE not installed in environment"
+            return None, "mne not available"
     except Exception as e:
         return None, f"Error reading EDF: {e}"
+
 
 # -------------------------
 # Compute band powers (PSD Welch)
