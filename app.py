@@ -132,20 +132,27 @@ def load_logo_bytes(logo_path: Optional[Path]) -> Optional[bytes]:
         return None
 
 # EDF reading safe (write to temp file for libraries that expect path)
-def read_edf_bytes(uploaded) -> Tuple[Optional["mne.io.Raw"], Optional[str]]:
-    if not uploaded:
-        return None, "No file"
+def read_edf_bytes(uploaded):
+    """
+    Reads an EDF file uploaded in Streamlit using BytesIO.
+    Safely handles temporary file storage (no info modifications).
+    """
+    if uploaded is None:
+        return None, "No file uploaded"
+
     try:
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".edf")
-        tmp.write(uploaded.getvalue())
-        tmp.flush(); tmp.close()
-        if HAS_MNE:
-            raw = mne.io.read_raw_edf(tmp.name, preload=True, verbose=False)
-            # store temp path in info so we can cleanup if needed
-            raw.info["temp_path"] = tmp.name
-            return raw, None
-        else:
-            return None, "mne not installed"
+        # 🔹 Save to a real temp file (safer for mne)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".edf") as tmp:
+            tmp.write(uploaded.getvalue())
+            tmp_path = tmp.name
+
+        # 🔹 Read EDF with MNE
+        raw = mne.io.read_raw_edf(tmp_path, preload=True, verbose=False)
+
+        # ✅ clean up (remove temp file)
+        os.remove(tmp_path)
+
+        return raw, None
     except Exception as e:
         return None, f"Error reading EDF: {e}"
 
