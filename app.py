@@ -132,29 +132,42 @@ def load_logo_bytes(logo_path: Optional[Path]) -> Optional[bytes]:
         return None
 
 # EDF reading safe (write to temp file for libraries that expect path)
-def read_edf_bytes(uploaded):
+def read_edf_bytes(uploaded) -> Tuple[Optional[mne.io.Raw], Optional[str]]:
     """
-    Reads an EDF file uploaded in Streamlit using BytesIO.
-    Safely handles temporary file storage (no info modifications).
+    Read uploaded EDF using MNE if available, else return None.
+    Returns (raw, msg) with debug info in Streamlit.
     """
-    if uploaded is None:
+    if not uploaded:
         return None, "No file uploaded"
 
+    buf = io.BytesIO(uploaded.getvalue())
+
     try:
-        # 🔹 Save to a real temp file (safer for mne)
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".edf") as tmp:
-            tmp.write(uploaded.getvalue())
-            tmp_path = tmp.name
+        if HAS_MNE:
+            st.info("📂 Reading EDF file... please wait")
 
-        # 🔹 Read EDF with MNE
-        raw = mne.io.read_raw_edf(tmp_path, preload=True, verbose=False)
+            # Read EDF file safely
+            raw = mne.io.read_raw_edf(buf, preload=True, verbose=False)
 
-        # ✅ clean up (remove temp file)
-        os.remove(tmp_path)
+            # ✅ Debug info: check shape, mean, and sample data
+            data, times = raw.get_data(return_times=True)
+            st.success(f"✅ EDF loaded successfully! Shape: {data.shape}")
+            st.write("📡 Sampling rate (Hz):", raw.info.get("sfreq"))
+            st.write("🧩 Mean amplitude:", float(np.mean(data)))
+            st.write("🔸 First 10 samples of channel 0:", data[0][:10].tolist())
 
-        return raw, None
+            # Optional: check channels list
+            st.write("🧠 Channels:", raw.ch_names)
+
+            return raw, None
+
+        else:
+            return None, "❌ MNE not available in environment"
+
     except Exception as e:
-        return None, f"Error reading EDF: {e}"
+        st.error(f"❌ Error reading EDF: {str(e)}")
+        return None, str(e)
+
 
 # compute band powers
 def compute_band_powers(raw, bands=BANDS):
