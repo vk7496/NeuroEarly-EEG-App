@@ -134,39 +134,46 @@ def load_logo_bytes(logo_path: Optional[Path]) -> Optional[bytes]:
 # EDF reading safe (write to temp file for libraries that expect path)
 def read_edf_bytes(uploaded) -> Tuple[Optional[mne.io.Raw], Optional[str]]:
     """
-    Read uploaded EDF using MNE if available, else return None.
-    Returns (raw, msg) with debug info in Streamlit.
+    Safely read uploaded EDF file by saving to a temporary file, then loading with MNE.
+    Compatible with Streamlit Cloud.
+    Returns (raw, msg).
     """
     if not uploaded:
         return None, "No file uploaded"
 
-    buf = io.BytesIO(uploaded.getvalue())
-
     try:
         if HAS_MNE:
-            st.info("📂 Reading EDF file... please wait")
+            st.info("📂 Saving and reading EDF file... please wait")
 
-            # Read EDF file safely
-            raw = mne.io.read_raw_edf(buf, preload=True, verbose=False)
+            # ذخیره موقت فایل EDF در حافظه محلی
+            tmp_dir = tempfile.mkdtemp()
+            tmp_path = os.path.join(tmp_dir, uploaded.name)
 
-            # ✅ Debug info: check shape, mean, and sample data
+            with open(tmp_path, "wb") as f:
+                f.write(uploaded.getvalue())
+
+            # حالا فایل رو با MNE بخون
+            raw = mne.io.read_raw_edf(tmp_path, preload=True, verbose=False)
+
+            # ✅ Debug info
             data, times = raw.get_data(return_times=True)
             st.success(f"✅ EDF loaded successfully! Shape: {data.shape}")
             st.write("📡 Sampling rate (Hz):", raw.info.get("sfreq"))
             st.write("🧩 Mean amplitude:", float(np.mean(data)))
             st.write("🔸 First 10 samples of channel 0:", data[0][:10].tolist())
-
-            # Optional: check channels list
             st.write("🧠 Channels:", raw.ch_names)
 
             return raw, None
 
         else:
-            return None, "❌ MNE not available in environment"
+            return None, "❌ MNE not available in this environment"
 
     except Exception as e:
         st.error(f"❌ Error reading EDF: {str(e)}")
         return None, str(e)
+
+
+    
 
 
 # compute band powers
