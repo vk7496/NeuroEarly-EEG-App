@@ -1,32 +1,39 @@
-# app.py — NeuroEarly Pro (v5.1) — Full Clinical Edition
-# Author: generated (adapt to environment)
-# Notes: designed for Streamlit Cloud + GitHub. Ensure dependencies installed:
-# streamlit, mne, scipy, numpy, pandas, matplotlib, reportlab, shap (optional), arabic-reshaper, python-bidi.
+# app.py — NeuroEarly v5.2 — Clinical + FDI + XAI
+# Author: generated for user (adapt paths if needed)
+# Requirements (recommended): streamlit, numpy, scipy, pandas, matplotlib,
+# mne or pyedflib, reportlab, arabic-reshaper, python-bidi, shap (optional), joblib (optional)
+# Place assets/goldenbird_logo.png and Amiri-Regular.ttf (optional) in repo.
 
-import os, io, sys, tempfile, traceback, json
+import os
+import io
+import sys
+import json
+import math
+import tempfile
+import traceback
 from pathlib import Path
 from datetime import datetime, date
-from typing import Optional, Tuple, List, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple
 
 import numpy as np
 import pandas as pd
+
+# plotting backend for server
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib import cm
 
-from scipy.signal import welch, coherence
-from scipy.interpolate import griddata
-
 import streamlit as st
-from PIL import Image
+from PIL import Image as PILImage
 
-# optional libraries
+# optional / heavy libs (graceful fallback)
 HAS_MNE = False
-HAS_MNE_CONN = False
-HAS_SHAP = False
+HAS_PYEDF = False
 HAS_REPORTLAB = False
 HAS_ARABIC = False
+HAS_SHAP = False
+HAS_JOBLIB = False
 
 try:
     import mne
@@ -35,16 +42,10 @@ except Exception:
     HAS_MNE = False
 
 try:
-    from mne_connectivity import spectral_connectivity
-    HAS_MNE_CONN = True
+    import pyedflib
+    HAS_PYEDF = True
 except Exception:
-    HAS_MNE_CONN = False
-
-try:
-    import shap
-    HAS_SHAP = True
-except Exception:
-    HAS_SHAP = False
+    HAS_PYEDF = False
 
 try:
     from reportlab.lib import colors
@@ -65,252 +66,265 @@ try:
 except Exception:
     HAS_ARABIC = False
 
-# Paths & constants
+try:
+    import shap
+    HAS_SHAP = True
+except Exception:
+    HAS_SHAP = False
+
+try:
+    import joblib
+    HAS_JOBLIB = True
+except Exception:
+    HAS_JOBLIB = False
+
 ROOT = Path(__file__).parent
 ASSETS = ROOT / "assets"
 LOGO_PATH = ASSETS / "goldenbird_logo.png"
 AMIRI_PATH = ROOT / "Amiri-Regular.ttf"
 SHAP_JSON = ROOT / "shap_summary.json"
 
-APP_TITLE = "NeuroEarly Pro — Clinical & Research"
-LIGHT_BG = "#eaf2ff"
+APP_TITLE = "NeuroEarly Pro — Clinical"
 BLUE = "#0b63d6"
+LIGHT_BG = "#eaf2ff"
 
+# EEG bands
 BANDS = {
     "Delta": (1.0, 4.0),
     "Theta": (4.0, 8.0),
     "Alpha": (8.0, 13.0),
     "Beta": (13.0, 30.0),
-    "Gamma": (30.0, 45.0)
+    "Gamma": (30.0, 45.0),
 }
 
-# helpers
 def now_ts(fmt="%Y%m%d_%H%M%S"):
     return datetime.utcnow().strftime(fmt)
 
-def safe_div(a,b):
+def clamp01(x):
     try:
-        return a/b if (b and b!=0) else (float('inf') if a and (not b) else 0.0)
+        return max(0.0, min(1.0, float(x)))
     except Exception:
         return 0.0
 
-def try_load_shap():
-    if SHAP_JSON.exists():
-        try:
-            return json.loads(SHAP_JSON.read_text(encoding="utf-8"))
-        except Exception:
-            return None
-    return None
-
-# ----------------------------
-# EDF reading: robust for Streamlit UploadedFile
-# ----------------------------
-def read_edf_bytes(uploaded) -> Tuple[Optional['mne.io.Raw'], Optional[str]]:
-    """Save uploaded file to a temp file and read with mne. Returns (raw, errmsg)."""
-    if not uploaded:
-        return None, "No file"
+# -----------------------
+# EDF reading (robust)
+# -----------------------
+def read_edf_to_tempfile(uploaded) -> Tuple[Optional[object], Optional[dict], Optional[str]]:
+    """
+    Accepts Streamlit UploadedFile or path; returns (raw_object, meta_dict, error_msg).
+    raw_object: if mne available -> mne Raw; if pyedflib available -> path to tempfile and meta.
+    meta: {'sfreq':..., 'ch_names':[...] }
+    """
+    if uploaded is None:
+        return None, None, "No file provided"
+    # if a path string
+    if isinstance(uploaded, (str, Path)):
+        p = str(uploaded)
+        if HAS_MNE:
+            try:
+                raw = mne.io.read_raw_edf(p, preload=True, verbose=False)
+                meta = {"sfreq": float(raw.info.get("sfreq", 256.0)), "ch_names": raw.info.get("ch_names", [])}
+                return raw, meta, None
+            except Exception as e:
+                return None, None, f"mne read error: {e}"
+        if HAS_PYEDF:
+            try:
+                edf = pyedflib.EdfReader(p)
+                n = edf.signals_in_file
+                chs = edf.getSignalLabels()
+                sf = edf.getSampleFrequency(0)
+                edf.close()
+                meta = {"sfreq": float(sf), "ch_names": chs}
+                return p, meta, None
+            except Exception as e:
+                return None, None, f"pyedflib read error: {e}"
+        return None, None, "No EDF backend available (install mne or pyedflib)"
+    # else assume UploadedFile
     try:
-        # write a safe temp file
-        with tempfile.NamedTemporaryFile(suffix=".edf", delete=False) as tmp:
-            tmp.write(uploaded.getvalue())
+        raw_bytes = uploaded.getvalue()
+    except Exception as e:
+        return None, None, f"uploaded file access error: {e}"
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".edf") as tmp:
+            tmp.write(raw_bytes)
             tmp.flush()
             tmp_path = tmp.name
         if HAS_MNE:
-            raw = mne.io.read_raw_edf(tmp_path, preload=True, verbose=False)
-            # do NOT write arbitrary keys into raw.info (avoid temp path assignment)
-            # but store temp path externally if needed
-            raw._tmp_path = tmp_path
-            return raw, None
-        else:
-            return None, "MNE not available"
-    except Exception as e:
-        return None, f"Error reading EDF: {e}"
+            try:
+                raw = mne.io.read_raw_edf(tmp_path, preload=True, verbose=False)
+                meta = {"sfreq": float(raw.info.get("sfreq", 256.0)), "ch_names": raw.info.get("ch_names", [])}
+                # don't delete tmp immediately because mne may use memory-mapping; but we keep it temporary
+                return raw, meta, None
+            except Exception:
+                # fallback to pyedflib
+                pass
+        if HAS_PYEDF:
+            try:
+                edf = pyedflib.EdfReader(tmp_path)
+                n = edf.signals_in_file
+                chs = edf.getSignalLabels()
+                sf = edf.getSampleFrequency(0)
+                edf.close()
+                meta = {"sfreq": float(sf), "ch_names": chs}
+                return tmp_path, meta, None
+            except Exception as e:
+                return None, None, f"pyedflib on temp file failed: {e}"
+        return None, None, "No EDF reader available"
+    finally:
+        # do not unlink here if mne returned raw (it may still read from file); leave to OS cleanup
+        pass
 
-# ----------------------------
-# Band power calculation (Welch)
-# ----------------------------
-def compute_band_powers(raw, bands=BANDS, picks=None, nperseg=2048):
+# -----------------------
+# PSD / band power
+# -----------------------
+from scipy.signal import welch, butter, sosfilt, coherence
+
+def bandpower_welch_per_channel(data: np.ndarray, sf: float, bands=BANDS, nperseg=2048):
     """
-    Returns (df, band_vals)
-    df: DataFrame indexed by ch names with columns e.g. 'Alpha_abs','Alpha_rel','total_power'
-    band_vals: dict band -> np.array per channel (abs power)
-    Also sets df.attrs theta_alpha_ratio and alpha_asym_F3_F4 if possible.
+    data: (n_channels, n_samples)
+    returns df_bands: DataFrame indexed by channel names "ch_0"...
+    with columns e.g. "Delta_abs","Delta_rel"
     """
-    ch_names = raw.ch_names if picks is None else [raw.ch_names[i] for i in picks]
-    sf = float(raw.info.get('sfreq', 256.0))
-    data = raw.get_data(picks=picks)  # n_chan x n_samples
-
-    nchan = data.shape[0]
-    band_vals = {b: np.zeros(nchan) for b in bands}
-    total_power = np.zeros(nchan)
-
-    for ci in range(nchan):
-        # compute PSD using welch
+    n_ch, n_s = data.shape
+    results = []
+    freqs = None
+    for i in range(n_ch):
         try:
-            f, Pxx = welch(data[ci, :], fs=sf, nperseg=min(nperseg, data.shape[1]))
+            f, Pxx = welch(data[i, :], fs=sf, nperseg=min(nperseg, n_s))
         except Exception:
-            f, Pxx = welch(data[ci, :], fs=sf)
-        mask_total = (f >= 1.0) & (f <= 45.0)
-        total = float(np.trapz(Pxx[mask_total], f[mask_total])) if mask_total.any() else 0.0
-        total_power[ci] = total
-        for band,(lo,hi) in bands.items():
-            mask = (f >= lo) & (f < hi)
+            f, Pxx = welch(data[i, :], fs=sf)
+        freqs = f if freqs is None else freqs
+        total = float(np.trapz(Pxx[(f>=1) & (f<=45)], f[(f>=1)&(f<=45)])) if np.any((f>=1)&(f<=45)) else 0.0
+        row = {}
+        for bname, (lo, hi) in bands.items():
+            mask = (f>=lo)&(f<hi)
             p = float(np.trapz(Pxx[mask], f[mask])) if mask.any() else 0.0
-            band_vals[band][ci] = p
+            row[f"{bname}_abs"] = p
+            row[f"{bname}_rel"] = (p/total) if total>0 else 0.0
+        row["total_power"] = total
+        results.append(row)
+    df = pd.DataFrame(results, index=[f"ch_{i}" for i in range(n_ch)])
+    return df
 
-    df = pd.DataFrame(index=ch_names)
-    for band in bands:
-        df[f"{band}_abs"] = band_vals[band]
-        df[f"{band}_rel"] = [ (v/tp if tp>0 else 0.0) for v,tp in zip(band_vals[band], total_power) ]
-    df['total_power'] = total_power
-
-    # derived metrics
-    try:
-        theta_mean = df["Theta_rel"].mean()
-        alpha_mean = df["Alpha_rel"].mean()
-        df.attrs["theta_alpha_ratio"] = (theta_mean/alpha_mean) if alpha_mean>0 else None
-    except Exception:
-        df.attrs["theta_alpha_ratio"] = None
-    if "F3" in df.index and "F4" in df.index:
-        try:
-            df.attrs["alpha_asym_F3_F4"] = df.loc["F3","Alpha_rel"] - df.loc["F4","Alpha_rel"]
-        except Exception:
-            df.attrs["alpha_asym_F3_F4"] = None
-    return df, band_vals
-
-# ----------------------------
-# Connectivity: use mne_connectivity if available else pairwise coherence
-# ----------------------------
-def compute_connectivity_matrix(raw, band=(8.0,13.0), picks=None):
-    data = raw.get_data(picks=picks)
-    sfreq = float(raw.info.get('sfreq', 256.0))
-    nchan = data.shape[0]
-    try:
-        if HAS_MNE_CONN:
-            con, freqs, times, ne, nt = spectral_connectivity(data[np.newaxis,:,:], method='coh', mode='fourier', sfreq=sfreq,
-                                                             fmin=band[0], fmax=band[1], faverage=True, verbose=False)
-            conn = con.squeeze()
-            if conn.ndim == 1:
-                conn = conn.reshape((nchan,nchan))
-            return conn, f"Spectral connectivity (MNE) computed {band[0]}-{band[1]} Hz"
-        else:
-            # fallback pairwise coherence
-            conn = np.zeros((nchan,nchan))
-            for i in range(nchan):
-                for j in range(i+1, nchan):
-                    try:
-                        f, Cxy = coherence(data[i,:], data[j,:], fs=sfreq, nperseg=min(2048, data.shape[1]))
-                        mask = (f>=band[0]) & (f<=band[1])
-                        val = float(Cxy[mask].mean()) if mask.any() else 0.0
-                    except Exception:
-                        val = 0.0
-                    conn[i,j] = conn[j,i] = val
-            return conn, f"Pairwise coherence (scipy) computed {band[0]}-{band[1]} Hz"
-    except Exception as e:
-        return None, f"Connectivity failed: {e}"
-
-# ----------------------------
-# Topomap / Heat image generator
-# ----------------------------
-def generate_topomap_image(values, ch_names, raw=None, band_name="Band"):
+# -----------------------
+# Topomap generation (simple)
+# -----------------------
+def generate_topomap_image(vals: np.ndarray, ch_names: List[str], band_name:str="Band"):
     """
-    Return PNG bytes for topomap-like visual.
-    If montage available uses interpolation, else uses grid of colored circles.
+    If no montage available, render simple grid representation.
+    Returns PNG bytes or None
     """
-    vals = np.asarray(values, dtype=float)
     try:
-        positions = {}
-        if raw is not None:
-            try:
-                montage = raw.get_montage()
-                posdict = montage.get_positions().get('ch_pos', {})
-                positions = {ch: posdict[ch] for ch in ch_names if ch in posdict}
-            except Exception:
-                positions = {}
-        fig = plt.figure(figsize=(4,3)); ax = fig.add_subplot(111)
-        if positions and len(positions)>=3:
-            xs = np.array([positions[ch][0] for ch in positions])
-            ys = np.array([positions[ch][1] for ch in positions])
-            vs = np.array([values[ch_names.index(ch)] for ch in positions])
-            xi = np.linspace(xs.min(), xs.max(), 80)
-            yi = np.linspace(ys.min(), ys.max(), 80)
-            xi, yi = np.meshgrid(xi, yi)
-            try:
-                zi = griddata((xs,ys), vs, (xi,yi), method='cubic')
-            except Exception:
-                zi = griddata((xs,ys), vs, (xi,yi), method='linear')
-            im = ax.imshow(zi, origin='lower', extent=(xs.min(), xs.max(), ys.min(), ys.max()), cmap='RdBu_r')
-            ax.scatter(xs, ys, c='k', s=8)
-            ax.set_xticks([]); ax.set_yticks([])
-            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-            ax.set_title(f"{band_name} topomap")
-        else:
-            # grid circles
-            n = len(vals)
-            cols = int(np.ceil(np.sqrt(n)))
-            rows = int(np.ceil(n/cols))
-            minv, maxv = (vals.min(), vals.max()) if n>0 else (0.0, 1.0)
-            for idx in range(n):
-                r = idx // cols
-                c = idx % cols
-                norm = (vals[idx]-minv)/(maxv-minv+1e-9)
-                color = cm.RdBu_r(norm)
-                circ = plt.Circle((c, -r), 0.4, color=color)
-                ax.add_patch(circ)
-                ax.text(c, -r, ch_names[idx], ha='center', va='center', fontsize=6, color='white')
-            ax.set_xlim(-0.5, cols-0.5); ax.set_ylim(-rows+0.5, 0.5)
-            ax.set_xticks([]); ax.set_yticks([])
-            m = matplotlib.cm.ScalarMappable(cmap='RdBu_r')
-            m.set_array(vals)
-            fig.colorbar(m, ax=ax, fraction=0.046, pad=0.04)
-            ax.set_title(f"{band_name} grid topomap")
+        arr = np.asarray(vals, dtype=float)
+        n = len(arr)
+        side = int(np.ceil(np.sqrt(n)))
+        grid = np.full((side, side), np.nan)
+        grid_flat = np.full(side*side, np.nan)
+        grid_flat[:n] = arr
+        grid = grid_flat.reshape(side, side)
+        fig, ax = plt.subplots(figsize=(4,3))
+        im = ax.imshow(grid, cmap='RdBu_r', interpolation='nearest', origin='upper')
+        ax.set_title(f"{band_name} Topomap")
+        ax.axis('off')
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         buf = io.BytesIO(); fig.tight_layout(); fig.savefig(buf, format='png', dpi=150); plt.close(fig); buf.seek(0)
         return buf.getvalue()
-    except Exception:
+    except Exception as e:
+        print("topomap error:", e)
         try:
-            fig = plt.figure(figsize=(4,3)); ax = fig.add_subplot(111)
-            ax.bar(range(len(vals)), vals)
-            ax.set_xticks(range(len(vals))); ax.set_xticklabels(ch_names, rotation=90, fontsize=6)
+            # fallback: bar chart
+            fig, ax = plt.subplots(figsize=(6,2.4))
+            ax.bar(range(len(arr)), arr)
+            ax.set_xticks(range(len(ch_names))); ax.set_xticklabels(ch_names, rotation=90, fontsize=6)
             ax.set_title(band_name)
-            buf = io.BytesIO(); fig.tight_layout(); fig.savefig(buf, format='png', dpi=150); plt.close(fig); buf.seek(0)
+            buf = io.BytesIO(); fig.tight_layout(); fig.savefig(buf, format='png', dpi=120); plt.close(fig); buf.seek(0)
             return buf.getvalue()
         except Exception:
             return None
 
-# ----------------------------
-# Focal Delta Index & Extreme Asymmetry helpers
-# ----------------------------
-def compute_focal_delta_index(df, region_channels: List[str], global_mean=None):
+# -----------------------
+# Connectivity (simple Pearson corr)
+# -----------------------
+def compute_connectivity_matrix(data: np.ndarray):
+    """
+    data: n_ch x n_samples -> compute correlation matrix
+    """
     try:
-        if not set(region_channels).issubset(set(df.index)):
-            return None
-        mean_reg = df.loc[region_channels, "Delta_abs"].mean()
-        if global_mean is None:
-            global_mean = df["Delta_abs"].mean()
-        if global_mean in (None,0):
-            return None
-        return float(mean_reg / global_mean)
-    except Exception:
+        x = data.copy()
+        x = (x - np.nanmean(x, axis=1, keepdims=True)) / (np.nanstd(x, axis=1, keepdims=True) + 1e-12)
+        conn = np.corrcoef(x)
+        conn = np.nan_to_num(conn)
+        return conn
+    except Exception as e:
+        print("connectivity error:", e)
         return None
 
-def compute_extreme_asymmetry(df, ch_right, ch_left):
+# -----------------------
+# FDI (Focal Delta Index)
+# -----------------------
+def compute_fdi(df_bands: pd.DataFrame):
+    """
+    Use Delta_rel column to compute focal delta index:
+    FDI_channel = channel_delta_rel / global_mean_delta_rel
+    Returns dict with global_mean, top_channel_idx, top_channel_name, FDI_value
+    """
     try:
-        if ch_right in df.index and ch_left in df.index:
-            r = df.loc[ch_right, "Delta_abs"]; l = df.loc[ch_left, "Delta_abs"]
-            if l == 0:
-                return float('inf') if r>0 else None
-            return float(r / l)
-    except Exception:
+        if "Delta_rel" in df_bands.columns:
+            vals = df_bands["Delta_rel"].values
+            global_mean = float(np.nanmean(vals))
+            idx = int(np.nanargmax(vals)) if len(vals)>0 else 0
+            top_val = float(vals[idx]) if len(vals)>0 else 0.0
+            fdi = float(top_val / (global_mean + 1e-12)) if global_mean>0 else None
+            return {"global_mean": global_mean, "top_idx": idx, "top_name": df_bands.index[idx] if idx < len(df_bands.index) else "", "top_value": top_val, "FDI": fdi}
+        return {}
+    except Exception as e:
+        print("FDI error:", e)
+        return {}
+
+# -----------------------
+# SHAP visualization
+# -----------------------
+def render_shap_bar_from_json(shap_json_path: Path, model_key_hint: str="depression_global"):
+    if not shap_json_path.exists():
+        return None
+    try:
+        with open(shap_json_path, "r", encoding="utf-8") as f:
+            sj = json.load(f)
+        # choose candidate key
+        key = model_key_hint if model_key_hint in sj else next(iter(sj.keys()))
+        feat = sj.get(key, {})
+        if not feat:
+            return None
+        s = pd.Series(feat).abs().sort_values(ascending=False).head(12)
+        fig, ax = plt.subplots(figsize=(6,3))
+        s.plot.bar(ax=ax)
+        ax.set_title("Top contributors (SHAP)")
+        fig.tight_layout()
+        buf = io.BytesIO(); fig.savefig(buf, format='png'); plt.close(fig); buf.seek(0)
+        return buf.getvalue()
+    except Exception as e:
+        print("shap render error:", e)
         return None
 
-# ----------------------------
-# PDF generation (reportlab) bilingual support
-# ----------------------------
+# -----------------------
+# PDF generation (ReportLab) bilingual support
+# -----------------------
+def reshape_ar(text):
+    if HAS_ARABIC:
+        try:
+            return get_display(arabic_reshaper.reshape(text))
+        except Exception:
+            return text
+    return text
+
 def generate_pdf_report(summary: dict, lang: str="en", amiri_path: Optional[str]=None) -> Optional[bytes]:
+    """
+    summary: {patient_info, metrics, topo_images, connectivity_image, fdi, shap_img, normative_bar, recommendations, created}
+    """
     if not HAS_REPORTLAB:
         return None
-    buffer = io.BytesIO()
     try:
+        buffer = io.BytesIO()
         doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=36, bottomMargin=36, leftMargin=44, rightMargin=44)
         styles = getSampleStyleSheet()
         base_font = "Helvetica"
@@ -327,16 +341,12 @@ def generate_pdf_report(summary: dict, lang: str="en", amiri_path: Optional[str]
         styles.add(ParagraphStyle(name="Note", fontName=base_font, fontSize=9, textColor=colors.grey))
 
         story = []
+        # header
         title = "NeuroEarly Pro — Clinical Report"
         if lang.startswith("ar") and HAS_ARABIC:
-            try:
-                title = get_display(arabic_reshaper.reshape("تقرير NeuroEarly Pro ـ السريري"))
-            except Exception:
-                title = "NeuroEarly Pro — Clinical Report"
-
+            title = reshape_ar("تقرير NeuroEarly Pro السريري")
         story.append(Paragraph(title, styles["TitleBlue"]))
-        story.append(Spacer(1,6))
-
+        story.append(Spacer(1,8))
         # logo
         if LOGO_PATH.exists():
             try:
@@ -344,103 +354,188 @@ def generate_pdf_report(summary: dict, lang: str="en", amiri_path: Optional[str]
                 story.append(img)
             except Exception:
                 pass
-        story.append(Spacer(1,6))
-
-        # patient meta
-        patient = summary.get("patient_info", {})
-        pid = patient.get("id","")
-        dob = patient.get("dob","")
-        created = summary.get("created", now_ts())
-        meta_table = [["Patient ID", pid], ["DOB", dob], ["Report generated", created]]
-        t2 = Table(meta_table, colWidths=[2.2*inch, 3.2*inch])
-        t2.setStyle(TableStyle([("GRID",(0,0),(-1,-1),0.25,colors.grey), ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#eef7ff"))]))
-        story.append(t2); story.append(Spacer(1,8))
-
-        # metrics
-        story.append(Paragraph("<b>QEEG Key Metrics</b>", styles["H2"]))
-        metrics = summary.get("metrics", {})
-        for k,v in metrics.items():
-            story.append(Paragraph(f"{k}: {v}", styles["Body"]))
         story.append(Spacer(1,8))
 
-        # normative bar (if present)
+        # patient info table
+        pinfo = summary.get("patient_info", {})
+        pid = pinfo.get("id","-")
+        dob = pinfo.get("dob","-")
+        created = summary.get("created", now_ts())
+        rows = [["Field","Value"], ["Patient ID", pid], ["DOB", dob], ["Report generated", created]]
+        t = Table(rows, colWidths=[2.6*inch,3.2*inch])
+        t.setStyle(TableStyle([("GRID",(0,0),(-1,-1),0.25,colors.grey),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#eef7ff"))]))
+        story.append(t); story.append(Spacer(1,8))
+
+        # Final ML Risk Score prominent
+        fs = summary.get("final_ml_risk", None)
+        if fs is not None:
+            story.append(Paragraph(f"<b>Final ML Risk Score: {fs*100:.1f}%</b>", styles["H2"]))
+            story.append(Spacer(1,6))
+
+        # Metrics
+        story.append(Paragraph("QEEG Key Metrics", styles["H2"]))
+        metrics = summary.get("metrics", {})
+        if metrics:
+            rows = [[k, str(v)] for k,v in metrics.items()]
+            t2 = Table(rows, colWidths=[3.2*inch,2.6*inch])
+            t2.setStyle(TableStyle([("GRID",(0,0),(-1,-1),0.25,colors.grey)]))
+            story.append(t2)
+            story.append(Spacer(1,6))
+        # normative bar
         if summary.get("normative_bar"):
             try:
-                story.append(Paragraph("<b>Normative Comparison</b>", styles["H2"]))
-                story.append(Spacer(1,0.1*inch))
-                story.append(RLImage(io.BytesIO(summary["normative_bar"]), width=5.5*inch, height=2.2*inch))
-                story.append(Spacer(1,0.2*inch))
+                story.append(Paragraph("Normative Comparison", styles["H2"]))
+                story.append(RLImage(io.BytesIO(summary["normative_bar"]), width=5.5*inch, height=2.0*inch))
+                story.append(Spacer(1,6))
             except Exception:
                 pass
 
-        # topomaps images
+        # topomaps
         if summary.get("topo_images"):
-            story.append(Paragraph("<b>Topography Maps</b>", styles["H2"]))
-            imgs = [RLImage(io.BytesIO(b), width=2.6*inch, height=1.6*inch) for _,b in summary["topo_images"].items() if b]
-            rows=[]; row=[]
-            for im in imgs:
+            story.append(Paragraph("Topography Maps", styles["H2"]))
+            imgs = []
+            for band, b in summary["topo_images"].items():
+                try:
+                    imgs.append(RLImage(io.BytesIO(b), width=2.6*inch, height=1.6*inch))
+                except Exception:
+                    pass
+            row=[]
+            for i,im in enumerate(imgs):
                 row.append(im)
-                if len(row)==2:
-                    rows.append(row); row=[]
-            if row: rows.append(row)
-            for r in rows:
-                story.append(Table([[x for x in r]], style=[("VALIGN",(0,0),(-1,-1),"MIDDLE")]))
-            story.append(Spacer(1,8))
+                if (i%2)==1:
+                    story.append(Table([row], colWidths=[2.6*inch,2.6*inch]))
+                    row=[]
+            if row:
+                story.append(Table([row], colWidths=[2.6*inch,2.6*inch]))
+            story.append(Spacer(1,6))
 
         # connectivity
         if summary.get("connectivity_image"):
-            story.append(Paragraph("<b>Functional Connectivity (Alpha)</b>", styles["H2"]))
+            story.append(Paragraph("Functional Connectivity (example)", styles["H2"]))
             try:
                 story.append(RLImage(io.BytesIO(summary["connectivity_image"]), width=5.5*inch, height=3.0*inch))
             except Exception:
                 pass
-            story.append(Spacer(1,8))
+            story.append(Spacer(1,6))
+
+        # FDI
+        if summary.get("fdi"):
+            story.append(Paragraph("Focal Delta Index (FDI)", styles["H2"]))
+            fdi = summary["fdi"]
+            story.append(Paragraph(f"Top channel: {fdi.get('top_name','-')} — FDI: {fdi.get('FDI', '-')}", styles["Body"]))
+            story.append(Spacer(1,6))
 
         # SHAP
         if summary.get("shap_img"):
-            story.append(Paragraph("<b>Model Explainability (SHAP)</b>", styles["H2"]))
+            story.append(Paragraph("Explainable AI (SHAP)", styles["H2"]))
             try:
                 story.append(RLImage(io.BytesIO(summary["shap_img"]), width=5.5*inch, height=3.0*inch))
             except Exception:
                 pass
-            story.append(Spacer(1,8))
-
-        # tumor/focal
-        if summary.get("tumor"):
-            story.append(Paragraph("<b>Focal Delta / Tumor indicators</b>", styles["H2"]))
-            story.append(Paragraph(summary["tumor"].get("narrative",""), styles["Body"]))
-            if summary["tumor"].get("alerts"):
-                for a in summary["tumor"]["alerts"]:
-                    story.append(Paragraph(f"- {a}", styles["Body"]))
             story.append(Spacer(1,6))
 
-        # recommendations
+        # Clinical questionnaires results (PHQ + AD8)
+        if summary.get("clinical"):
+            story.append(Paragraph("Clinical Questionnaires", styles["H2"]))
+            cli = summary["clinical"]
+            if cli.get("phq_score") is not None:
+                story.append(Paragraph(f"PHQ-9 Score: {cli.get('phq_score')} (max 27)", styles["Body"]))
+            if cli.get("ad_score") is not None:
+                story.append(Paragraph(f"Cognitive Screening Score: {cli.get('ad_score')} (max 24)", styles["Body"]))
+            story.append(Spacer(1,6))
+
+        # Recommendations
         if summary.get("recommendations"):
-            story.append(Paragraph("<b>Structured Clinical Recommendations</b>", styles["H2"]))
+            story.append(Paragraph("Structured Clinical Recommendations", styles["H2"]))
             for r in summary["recommendations"]:
                 story.append(Paragraph(r, styles["Body"]))
-            story.append(Spacer(1,12))
+            story.append(Spacer(1,6))
 
+        # footer
         story.append(Paragraph("Prepared by Golden Bird LLC — NeuroEarly Pro System, 2025", styles["Note"]))
-        story.append(Spacer(1,12))
-        story.append(Paragraph("Signature: ____________________", styles["Body"]))
-
+        story.append(Spacer(1,6))
         doc.build(story)
         buffer.seek(0)
         return buffer.getvalue()
     except Exception as e:
+        print("PDF generation error:", e)
+        traceback.print_exc()
         return None
 
-# ----------------------------
-# UI Layout
-# ----------------------------
+# -----------------------
+# Clinical questionnaires (PHQ-9 adjusted and Alzheimer 8)
+# -----------------------
+PHQ9_QUESTIONS = [
+    "1. Little interest or pleasure in doing things",
+    "2. Feeling down, depressed, or hopeless",
+    # 3 special: sleep
+    "3. Sleep problems (choose the option that best describes you)",
+    "4. Feeling tired or having little energy",
+    # 5 special: appetite
+    "5. Appetite changes (choose the option that best describes you)",
+    "6. Feeling bad about yourself — or that you are a failure or have let yourself or your family down",
+    "7. Trouble concentrating on things, such as reading the newspaper or watching television",
+    # 8 special: psychomotor
+    "8. Moving or speaking so slowly that other people could have noticed? Or the opposite — being so fidgety or restless that you have been moving a lot more than usual",
+    "9. Thoughts that you would be better off dead or of hurting yourself in some way"
+]
+# scoring options for typical PHQ9 (0-3)
+PHQ_STANDARD_OPTIONS = [
+    ("0 - Not at all", 0),
+    ("1 - Several days", 1),
+    ("2 - More than half the days", 2),
+    ("3 - Nearly every day", 3)
+]
+# for Q3 (sleep) we need options that map 0-3 but with labels indicating type
+PHQ_Q3_OPTIONS = [
+    ("0 - No change", 0),
+    ("1 - Difficulty falling/staying asleep (insomnia) - Several days", 1),
+    ("2 - Mostly difficulty sleeping (insomnia) - More than half the days", 2),
+    ("3 - Hypersomnia (sleeping more) - Nearly every day", 3)
+]
+# Q5 appetite
+PHQ_Q5_OPTIONS = [
+    ("0 - No change", 0),
+    ("1 - Decreased appetite - Several days", 1),
+    ("2 - Increased or decreased appetite - More than half the days", 2),
+    ("3 - Marked change in appetite - Nearly every day", 3)
+]
+# Q8 psychomotor (slow vs restless)
+PHQ_Q8_OPTIONS = [
+    ("0 - No change", 0),
+    ("1 - Slightly slowed or restless - Several days", 1),
+    ("2 - Noticeably slowed or restless - More than half the days", 2),
+    ("3 - Marked psychomotor change - Nearly every day", 3)
+]
+
+ALZ_QUESTIONS = [
+    "1. Recurrent memory loss (e.g., forgetting recent events)",
+    "2. Difficulty with orientation (time/place)",
+    "3. Difficulty naming familiar objects/people",
+    "4. Getting lost in familiar places",
+    "5. Noticeable personality or behavior changes",
+    "6. Difficulty performing familiar tasks",
+    "7. Impaired judgement or decision making",
+    "8. Social withdrawal or apathy"
+]
+ALZ_OPTIONS = [
+    ("0 - No", 0),
+    ("1 - Occasionally", 1),
+    ("2 - Often", 2),
+    ("3 - Always / Severe", 3)
+]
+
+# -----------------------
+# Streamlit UI
+# -----------------------
 st.set_page_config(page_title=APP_TITLE, layout="wide")
+# header banner
 header_html = f"""
 <div style="display:flex;align-items:center;justify-content:space-between;padding:10px;border-radius:8px;background:{LIGHT_BG};">
   <div style="font-weight:700;color:{BLUE};font-size:18px;">🧠 {APP_TITLE}</div>
   <div style="display:flex;align-items:center;">
-     <div style="font-size:12px;color:#333;margin-right:16px;">Prepared by Golden Bird LLC</div>
-     {'<img src="'+str(LOGO_PATH).replace("\\\\","/")+'" style="height:42px;">' if LOGO_PATH.exists() else ''}
+     <div style="font-size:12px;color:#333;margin-right:12px;">Prepared by Golden Bird LLC</div>
+     {'<img src="'+str(LOGO_PATH).replace('\\\\','/')+'" style="height:42px;">' if LOGO_PATH.exists() else ''}
   </div>
 </div>
 """
@@ -449,233 +544,319 @@ st.markdown(header_html, unsafe_allow_html=True)
 # Sidebar (left)
 with st.sidebar:
     st.header("Settings")
-    lang_choice = st.selectbox("Language / اللغة", ["English","العربية"], index=0)
-    lang = "ar" if lang_choice.startswith("ع") else "en"
-    st.session_state["lang"] = lang
+    lang_choice = st.selectbox("Language / اللغة", ["English", "Arabic"], index=0)
+    lang = "ar" if lang_choice.startswith("Ar") or lang_choice.startswith("ع") else "en"
 
     st.markdown("---")
-    st.subheader("Patient info")
+    st.subheader("Patient Information")
     patient_name = st.text_input("Patient Name (optional)", value="")
     patient_id = st.text_input("Patient ID", value="")
     dob = st.date_input("Date of Birth", value=date(1980,1,1), min_value=date(1900,1,1), max_value=date(2025,12,31))
-    sex = st.selectbox("Sex", ["Unknown","Male","Female"], index=0)
-
+    sex = st.selectbox("Sex", ["Unknown", "Male", "Female", "Other"])
     st.markdown("---")
-    st.subheader("Current medications")
-    meds = st.text_area("List current meds (one per line)", value="", height=80)
-    st.markdown("---")
-    st.subheader("Blood Tests (summary)")
-    labs = st.text_area("Enter labs (one per line) e.g. B12: 250 pg/mL", value="", height=100)
-
+    st.subheader("Medications (one per line)")
+    meds = st.text_area("Medications", value="", height=80)
+    st.subheader("Blood tests (summary)")
+    labs = st.text_area("Labs (one per line, e.g. B12:250)", value="", height=100)
     st.markdown("---")
     st.subheader("Upload EDF files")
-    uploads = st.file_uploader("Drag & drop EDF files (.edf) — you can upload multiple", type=["edf"], accept_multiple_files=True)
-
+    uploads = st.file_uploader("Upload .edf files (multiple allowed)", type=["edf","EDF"], accept_multiple_files=True)
     st.markdown("")
-    process_btn = st.button("Process EDF(s) and Analyze")
+    run_btn = st.button("Process & Analyze")
 
-# main columns
-col_console, col_main = st.columns([1,2])
+# main layout: left console + right content
+col_console, col_content = st.columns([1,2])
 with col_console:
     st.markdown("### Console")
-    console_placeholder = st.empty()
-
-with col_main:
-    st.markdown("### Results")
-    main_placeholder = st.empty()
+    console = st.empty()
+with col_content:
+    st.markdown("### Analysis & Results")
+    main_area = st.container()
 
 def console_log(msg, kind="info"):
     if kind=="info":
-        console_placeholder.info(msg)
+        console.info(msg)
     elif kind=="success":
-        console_placeholder.success(msg)
+        console.success(msg)
     elif kind=="warning":
-        console_placeholder.warning(msg)
+        console.warning(msg)
     elif kind=="error":
-        console_placeholder.error(msg)
+        console.error(msg)
     else:
-        console_placeholder.write(msg)
+        console.write(msg)
 
-# storage
+# questionnaire UI (display in main content before processing)
+with main_area:
+    st.subheader("Clinical Questionnaires")
+    st.markdown("#### Depression (PHQ-9)")
+    phq_answers = {}
+    # render PHQ-9 with special options for 3,5,8
+    for i, q in enumerate(PHQ9_QUESTIONS, start=1):
+        key = f"phq_{i}"
+        if i == 3:
+            # special options
+            sel = st.selectbox(q, [o[0] for o in PHQ_Q3_OPTIONS], index=0, key=key+"_q3")
+            phq_answers[key] = dict(PHQ_Q3_OPTIONS)[sel] if sel in dict(PHQ_Q3_OPTIONS) else PHQ_Q3_OPTIONS[[o[0] for o in PHQ_Q3_OPTIONS].index(sel)][1]
+        elif i == 5:
+            sel = st.selectbox(q, [o[0] for o in PHQ_Q5_OPTIONS], index=0, key=key+"_q5")
+            phq_answers[key] = dict(PHQ_Q5_OPTIONS)[sel] if sel in dict(PHQ_Q5_OPTIONS) else PHQ_Q5_OPTIONS[[o[0] for o in PHQ_Q5_OPTIONS].index(sel)][1]
+        elif i == 8:
+            sel = st.selectbox(q, [o[0] for o in PHQ_Q8_OPTIONS], index=0, key=key+"_q8")
+            phq_answers[key] = dict(PHQ_Q8_OPTIONS)[sel] if sel in dict(PHQ_Q8_OPTIONS) else PHQ_Q8_OPTIONS[[o[0] for o in PHQ_Q8_OPTIONS].index(sel)][1]
+        else:
+            sel = st.selectbox(q, [o[0] for o in PHQ_STANDARD_OPTIONS], index=0, key=key)
+            phq_answers[key] = dict(PHQ_STANDARD_OPTIONS)[sel] if sel in dict(PHQ_STANDARD_OPTIONS) else PHQ_STANDARD_OPTIONS[[o[0] for o in PHQ_STANDARD_OPTIONS].index(sel)][1]
+
+    st.markdown("#### Cognitive Screening (Alzheimer's short form)")
+    ad_answers = {}
+    for i, q in enumerate(ALZ_QUESTIONS, start=1):
+        key = f"ad_{i}"
+        sel = st.selectbox(q, [o[0] for o in ALZ_OPTIONS], index=0, key=key)
+        ad_answers[key] = dict(ALZ_OPTIONS)[sel] if sel in dict(ALZ_OPTIONS) else ALZ_OPTIONS[[o[0] for o in ALZ_OPTIONS].index(sel)][1]
+
+# session storage
 if "results" not in st.session_state:
     st.session_state["results"] = []
 
-# normative bar generator (simple visual)
-def generate_normative_bar(theta_alpha, alpha_asym):
-    # simple bar: patient vs normative thresholds
-    fig = plt.figure(figsize=(6,2.2)); ax = fig.add_subplot(111)
-    labels = ["Theta/Alpha","Alpha Asym (F3-F4)"]
-    vals = [theta_alpha if theta_alpha is not None else 0.0, alpha_asym if alpha_asym is not None else 0.0]
-    # normative ranges: white normal, red abnormal region
-    ax.bar(range(len(vals)), vals, color=['#1f77b4','#1f77b4'])
-    ax.set_xticks(range(len(vals))); ax.set_xticklabels(labels)
-    ax.axhspan(0,1.2,alpha=0.06,color='white')  # normative
-    ax.axhspan(1.2,10,alpha=0.08,color='red')   # abnormal
-    ax.set_ylim(0,max(1.5, max(vals)*1.2))
-    buf = io.BytesIO(); fig.tight_layout(); fig.savefig(buf, format='png'); plt.close(fig); buf.seek(0)
-    return buf.getvalue()
-
-# Process on button
-if process_btn:
+# Process button action
+if run_btn:
+    # sanity checks
     if not uploads:
-        console_log("No EDF uploaded. Please upload EDF files.", "error")
+        st.error("Please upload at least one EDF file to analyze.")
     else:
         st.session_state["results"] = []
+        console_log("Starting processing...", "info")
         for up in uploads:
             try:
                 console_log(f"Reading {up.name} ...", "info")
-                raw, err = read_edf_bytes(up)
-                if raw is None:
-                    console_log(f"{up.name} read failed: {err}", "error"); continue
+                raw_obj, meta, err = read_edf_to_tempfile(up)
+                if err:
+                    console_log(f"{up.name} read error: {err}", "error")
+                    continue
+                # obtain data array (n_ch x n_samples)
+                if HAS_MNE and isinstance(raw_obj, mne.io.BaseRaw):
+                    data = raw_obj.get_data()
+                    ch_names = raw_obj.info.get("ch_names", [f"ch{i}" for i in range(data.shape[0])])
+                    sf = float(raw_obj.info.get("sfreq", 250.0))
+                else:
+                    # raw_obj may be path (pyedflib)
+                    if isinstance(raw_obj, str) and HAS_PYEDF:
+                        edf = pyedflib.EdfReader(raw_obj)
+                        n = edf.signals_in_file
+                        ch_names = edf.getSignalLabels()
+                        sf = float(edf.getSampleFrequency(0))
+                        arrs = []
+                        for i in range(n):
+                            arrs.append(edf.readSignal(i))
+                        data = np.vstack(arrs)
+                        edf.close()
+                    else:
+                        console_log(f"No usable raw object for {up.name}.", "error"); continue
 
-                # debug info
-                try:
-                    data = raw.get_data()
-                    console_log(f"{up.name}: {len(raw.ch_names)} channels, {raw.n_times} samples, sfreq={raw.info.get('sfreq')}", "success")
-                except Exception:
-                    console_log("Couldn't fetch data shape", "warning")
+                console_log(f"{up.name}: channels={data.shape[0]}, samples={data.shape[1]}, sfreq={sf}", "success")
 
                 # compute band powers
-                df_bands, band_vals = compute_band_powers(raw)
-                # connectivity (alpha)
-                conn_mat, conn_narr = compute_connectivity_matrix(raw, band=BANDS.get("Alpha",(8.0,13.0)))
+                df_bands = bandpower_welch_per_channel(data, sf, bands=BANDS)
+                # compute FDI
+                fdi = compute_fdi(df_bands)
 
-                # topomap images
+                # compute band-wise topomaps (use relative if available)
                 topo_imgs = {}
-                for band, arr in band_vals.items():
-                    topo_imgs[band] = generate_topomap_image(arr, df_bands.index.tolist(), raw=raw, band_name=band)
+                for b in BANDS.keys():
+                    col_rel = f"{b}_rel" if f"{b}_rel" in df_bands.columns else None
+                    if col_rel:
+                        vals = df_bands[col_rel].values
+                    else:
+                        vals = df_bands[f"{b}_abs"].values if f"{b}_abs" in df_bands.columns else np.zeros(data.shape[0])
+                    img = generate_topomap_image(vals, ch_names, band_name=b)
+                    topo_imgs[b] = img
 
-                # connectivity image
+                # compute connectivity on band-filtered data (Alpha/Theta/Delta)
                 conn_img = None
-                if conn_mat is not None:
-                    try:
-                        fig = plt.figure(figsize=(4,3)); ax = fig.add_subplot(111)
-                        im = ax.imshow(conn_mat, cmap='viridis'); fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-                        ax.set_title("Connectivity (Alpha)")
+                try:
+                    conn_mats={}
+                    for bnm, (lo,hi) in {"Delta":BANDS["Delta"], "Theta":BANDS["Theta"], "Alpha":BANDS["Alpha"]}.items():
+                        try:
+                            sos = butter(4, [lo, hi], btype="band", fs=sf, output="sos")
+                            filtered = np.array([sosfilt(sos, data[i]) for i in range(data.shape[0])])
+                            conn = compute_connectivity_matrix(filtered)
+                            if conn is not None:
+                                conn_mats[bnm] = conn
+                        except Exception:
+                            pass
+                    chosen = conn_mats.get("Alpha") or (next(iter(conn_mats.values())) if conn_mats else None)
+                    if chosen is not None:
+                        fig, ax = plt.subplots(figsize=(4,3))
+                        im = ax.imshow(chosen, cmap='viridis')
+                        ax.set_title("Connectivity (matrix)")
+                        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
                         buf = io.BytesIO(); fig.tight_layout(); fig.savefig(buf, format='png'); plt.close(fig); buf.seek(0)
                         conn_img = buf.getvalue()
-                    except Exception as e:
-                        console_log(f"Connectivity image failed: {e}", "warning")
+                except Exception as e:
+                    console_log(f"Connectivity generation failed: {e}", "warning")
 
-                # focal delta and tumor indicators (heuristic)
-                focal_alerts = []
-                try:
-                    # region for "temporal" approx hippocampal: T7/T8 or T3/T4 depending on montage
-                    regionL = [c for c in df_bands.index if c.upper() in ("T7","T3","T5","T1")]
-                    regionR = [c for c in df_bands.index if c.upper() in ("T8","T4","T6","T2")]
-                    # compute focal delta index for strongest channel
-                    peak_ch = df_bands["Delta_abs"].idxmax()
-                    peak_val = df_bands.loc[peak_ch, "Delta_abs"]
-                    global_mean = df_bands["Delta_abs"].mean()
-                    fdi = compute_focal_delta_index(df_bands, [peak_ch], global_mean=global_mean)
-                    if fdi and fdi>2.0:
-                        focal_alerts.append(f"Focal Delta Index elevated at {peak_ch} (FDI={fdi:.2f}) — consider focal lesion/tumor workup.")
-                    # extreme asymmetry T7/T8
-                    if "T7" in df_bands.index and "T8" in df_bands.index:
-                        ea = compute_extreme_asymmetry(df_bands, "T8","T7")
-                        if ea and (ea>3.0 or ea<0.33):
-                            focal_alerts.append(f"Extreme delta asymmetry between T7/T8 (ratio {ea:.2f}).")
-                except Exception:
-                    pass
-
-                # SHAP
+                # SHAP visualization (if provided)
                 shap_img = None
-                shap_data = try_load_shap()
-                if shap_data:
-                    model_key = "depression_global"
-                    if df_bands.attrs.get("theta_alpha_ratio",0) and df_bands.attrs.get("theta_alpha_ratio",0)>1.3:
-                        model_key = "alzheimers_global"
-                    features = shap_data.get(model_key, {})
-                    if features:
-                        s = pd.Series(features).abs().sort_values(ascending=False)
-                        fig = plt.figure(figsize=(6,3)); ax = fig.add_subplot(111)
-                        s.head(10).plot.bar(ax=ax)
-                        ax.set_title("Top contributors (SHAP)")
-                        buf = io.BytesIO(); fig.tight_layout(); fig.savefig(buf, format='png'); plt.close(fig); buf.seek(0)
-                        shap_img = buf.getvalue()
+                if SHAP_JSON.exists() and HAS_SHAP:
+                    try:
+                        # heuristics to pick model
+                        model_key = "depression_global" if df_bands["Theta_rel"].mean() < 0.5 else "alzheimers_global"
+                        shap_img = render_shap_bar_from_json(SHAP_JSON, model_key)
+                    except Exception as e:
+                        console_log(f"SHAP render failed: {e}", "warning")
 
-                # normative bar
-                norm_bar = None
+                # normative bar chart for Theta/Alpha and Alpha asymmetry
+                normative_bar = None
                 try:
-                    norm_bar = generate_normative_bar(df_bands.attrs.get("theta_alpha_ratio",0) or 0.0, df_bands.attrs.get("alpha_asym_F3_F4",0) or 0.0)
+                    theta_alpha = (df_bands["Theta_rel"].mean() / (df_bands["Alpha_rel"].mean() + 1e-12)) if "Theta_rel" in df_bands.columns and "Alpha_rel" in df_bands.columns else 0.0
+                    alpha_asym = None
+                    # try find F3 and F4 indexes if present
+                    f3_idx = next((i for i,cn in enumerate(ch_names) if "F3" in cn), None)
+                    f4_idx = next((i for i,cn in enumerate(ch_names) if "F4" in cn), None)
+                    if f3_idx is not None and f4_idx is not None and "Alpha_rel" in df_bands.columns:
+                        alpha_asym = float(df_bands.iloc[f3_idx]["Alpha_rel"] - df_bands.iloc[f4_idx]["Alpha_rel"])
+                    fig, ax = plt.subplots(figsize=(5.5,2.2))
+                    labels = ["Theta/Alpha", "Alpha Asym (F3-F4)"]
+                    vals = [theta_alpha, alpha_asym if alpha_asym is not None else 0.0]
+                    ax.bar(range(len(vals)), vals, color=['#1f77b4','#1f77b4'])
+                    ax.set_xticks(range(len(vals))); ax.set_xticklabels(labels)
+                    ax.axhspan(0,1.2,alpha=0.06,color='white')
+                    ax.axhspan(1.2,10,alpha=0.08,color='red')
+                    ax.set_ylim(0, max(1.5, max(vals)+0.1))
+                    buf = io.BytesIO(); fig.tight_layout(); fig.savefig(buf, format='png'); plt.close(fig); buf.seek(0)
+                    normative_bar = buf.getvalue()
                 except Exception:
-                    norm_bar = None
+                    normative_bar = None
 
+                # Clinical questionnaire scoring
+                phq_score = 0
+                for i in range(1,10):
+                    key = f"phq_{i}"
+                    val = phq_answers.get(key) if 'phq_answers' in locals() else None
+                    # If val is None because reading earlier variable scoping, read from session_state keys
+                    if val is None:
+                        # try reading from st.session_state
+                        val = st.session_state.get(f"phq_{i}_q{i}", None) or st.session_state.get(f"phq_{i}", None)
+                    try:
+                        phq_score += int(val)
+                    except Exception:
+                        pass
+
+                # Alternative: read from UI stored dict (we populated phq_answers in UI scope)
+                # ensure fallback:
+                if 'phq_answers' in locals() and isinstance(phq_answers, dict):
+                    phq_score = 0
+                    for i in range(1,10):
+                        key = f"phq_{i}"
+                        v = phq_answers.get(key)
+                        try:
+                            phq_score += int(v)
+                        except Exception:
+                            pass
+
+                ad_score = 0
+                if 'ad_answers' in locals() and isinstance(ad_answers, dict):
+                    for i in range(1,9):
+                        key = f"ad_{i}"
+                        v = ad_answers.get(key, 0)
+                        try:
+                            ad_score += int(v)
+                        except Exception:
+                            pass
+
+                # Final ML Risk Score (heuristic combination)
+                try:
+                    theta_alpha_val = (df_bands["Theta_rel"].mean() / (df_bands["Alpha_rel"].mean()+1e-12)) if "Theta_rel" in df_bands.columns and "Alpha_rel" in df_bands.columns else 0.0
+                    # normalize heuristically
+                    theta_alpha_norm = clamp01(theta_alpha_val / 2.0)  # assume >2 is high
+                    phq_norm = clamp01(phq_score / 27.0)
+                    ad_norm = clamp01(ad_score / 24.0)
+                    # weights: theta/alpha 0.45, ad 0.35, phq 0.2
+                    final_risk = 0.45*theta_alpha_norm + 0.35*ad_norm + 0.2*phq_norm
+                except Exception:
+                    final_risk = 0.0
+
+                # metrics
                 metrics = {
-                    "theta_alpha_ratio": df_bands.attrs.get("theta_alpha_ratio"),
-                    "alpha_asym_F3_F4": df_bands.attrs.get("alpha_asym_F3_F4"),
-                    "mean_connectivity_alpha": float(conn_mat.mean()) if (conn_mat is not None) else None
+                    "theta_alpha_ratio": float(df_bands["Theta_rel"].mean() / (df_bands["Alpha_rel"].mean()+1e-12)) if "Theta_rel" in df_bands.columns and "Alpha_rel" in df_bands.columns else None,
+                    "alpha_asym_F3_F4": float(df_bands.iloc[f3_idx]["Alpha_rel"] - df_bands.iloc[f4_idx]["Alpha_rel"]) if (f3_idx is not None and f4_idx is not None and "Alpha_rel" in df_bands.columns) else None,
+                    "mean_connectivity_alpha": float(np.nanmean(conn_mats["Alpha"])) if ('conn_mats' in locals() and "Alpha" in conn_mats) else None
                 }
 
-                res = {
+                # assemble result dict
+                result = {
                     "filename": up.name,
                     "df_bands": df_bands,
-                    "band_vals": band_vals,
                     "topo_images": topo_imgs,
-                    "connectivity_matrix": conn_mat,
                     "connectivity_image": conn_img,
-                    "connectivity_narrative": conn_narr,
-                    "focal": {"alerts": focal_alerts, "FDI": fdi if 'fdi' in locals() else None},
+                    "fdi": fdi,
                     "shap_img": shap_img,
+                    "normative_bar": normative_bar,
                     "metrics": metrics,
-                    "normative_bar": norm_bar,
-                    "patient_info": {"id": patient_id, "dob": str(dob), "name": patient_name}
+                    "phq_score": phq_score,
+                    "ad_score": ad_score,
+                    "final_ml_risk": final_risk,
                 }
-                st.session_state["results"].append(res)
+                st.session_state["results"].append(result)
                 console_log(f"Processed {up.name} successfully.", "success")
             except Exception as e:
-                console_log(f"Error processing {up.name}: {e}\n{traceback.format_exc()}", "error")
+                console_log(f"Processing error for {up.name}: {e}\n{traceback.format_exc()}", "error")
 
-# show results
+# display results
 if st.session_state.get("results"):
-    for idx,res in enumerate(st.session_state["results"]):
-        st.markdown(f"## Result: {res.get('filename')}")
-        st.markdown("**QEEG Key Metrics**")
+    for res in st.session_state["results"]:
+        st.markdown(f"### File: {res.get('filename')}")
+        st.markdown("**Key QEEG Metrics**")
         st.write(res.get("metrics"))
+        st.markdown("**PHQ-9 Score:** " + str(res.get("phq_score")))
+        st.markdown("**Cognitive Score:** " + str(res.get("ad_score")))
+        st.markdown("**Final ML Risk Score:** " + f"{res.get('final_ml_risk',0)*100:.1f}%")
         # topomaps
-        st.markdown("### Topography Maps")
-        cols = st.columns(2)
+        st.markdown("Topography Maps")
+        cols = st.columns(3)
         i=0
-        for band,img in res.get("topo_images",{}).items():
+        for band,img in res.get("topo_images", {}).items():
             if img:
-                with cols[i%2]:
-                    st.image(img, caption=f"{band} topomap", use_container_width=True)
-                i+=1
+                try:
+                    cols[i%3].image(img, caption=band, width=None)
+                except Exception:
+                    pass
+            i+=1
         # connectivity
         if res.get("connectivity_image"):
-            st.markdown("### Functional Connectivity (Alpha)")
-            st.image(res.get("connectivity_image"), use_container_width=True)
+            st.markdown("Functional Connectivity (matrix)")
+            st.image(res.get("connectivity_image"))
+        else:
+            st.info("Connectivity not available (install required libs for best results).")
         # normative
         if res.get("normative_bar"):
-            st.markdown("### Normative Comparison")
-            st.image(res.get("normative_bar"), use_container_width=True)
+            st.markdown("Normative Comparison")
+            st.image(res.get("normative_bar"))
         # SHAP
         if res.get("shap_img"):
-            st.markdown("### Model Explainability (SHAP)")
-            st.image(res.get("shap_img"), use_container_width=True)
-        # focal alerts
-        if res.get("focal",{}).get("alerts"):
-            st.markdown("### Focal Alerts")
-            for a in res["focal"]["alerts"]:
-                st.warning(a)
+            st.markdown("SHAP (XAI)")
+            st.image(res.get("shap_img"))
+        # FDI
+        if res.get("fdi"):
+            st.markdown("Focal Delta Index (FDI)")
+            st.write(res.get("fdi"))
+        st.markdown("---")
 
-# Export / PDF
-st.markdown("---")
-st.subheader("Export")
-if st.session_state.get("results"):
+    # Exports
+    st.markdown("### Export")
     try:
-        # CSV aggregate
+        # CSV
         rows=[]
         for r in st.session_state["results"]:
-            df = r["df_bands"]
-            row = {"filename": r["filename"]}
-            for b in BANDS.keys():
-                try:
-                    row[f"{b}_mean_rel"] = float(df[f"{b}_rel"].mean())
-                    row[f"{b}_mean_abs"] = float(df[f"{b}_abs"].mean())
-                except Exception:
-                    row[f"{b}_mean_rel"] = None; row[f"{b}_mean_abs"] = None
-            row.update(r.get("metrics",{}))
+            row = {"filename": r["filename"], "phq_score": r.get("phq_score"), "ad_score": r.get("ad_score"), "final_ml_risk": r.get("final_ml_risk")}
+            # add band means
+            df = r.get("df_bands")
+            if isinstance(df, pd.DataFrame):
+                for b in BANDS.keys():
+                    try:
+                        row[f"{b}_mean_rel"] = float(df[f"{b}_rel"].mean())
+                    except Exception:
+                        row[f"{b}_mean_rel"] = None
             rows.append(row)
         df_export = pd.DataFrame(rows)
         csv = df_export.to_csv(index=False).encode("utf-8")
@@ -683,35 +864,38 @@ if st.session_state.get("results"):
     except Exception:
         pass
 
+    # PDF generation (first result for simplicity)
     if st.button("Generate PDF report (first result)"):
         try:
             r = st.session_state["results"][0]
             summary = {
-                "patient_info": r.get("patient_info",{}),
-                "metrics": r.get("metrics",{}),
-                "topo_images": r.get("topo_images",{}),
+                "patient_info": {"id": patient_id, "dob": dob.isoformat(), "meds": meds, "labs": labs},
+                "metrics": r.get("metrics", {}),
+                "topo_images": r.get("topo_images", {}),
                 "connectivity_image": r.get("connectivity_image"),
-                "tumor": r.get("focal",{}),
+                "fdi": r.get("fdi"),
                 "shap_img": r.get("shap_img"),
                 "normative_bar": r.get("normative_bar"),
+                "clinical": {"phq_score": r.get("phq_score"), "ad_score": r.get("ad_score")},
+                "final_ml_risk": r.get("final_ml_risk"),
                 "recommendations": [
-                    "This is an automated screening report. Clinical correlation required.",
-                    "Consider MRI if focal delta index >2 or extreme asymmetry is present.",
-                    "Follow-up in 3-6 months for moderate risk cases."
+                    "Automated screening only — clinical correlation required.",
+                    "Consider MRI if focal delta index > 2 or extreme asymmetry is present.",
+                    "If ML Risk > 30%, consider cognitive follow-up and further assessment."
                 ],
                 "created": now_ts()
             }
-            pdf_bytes = generate_pdf_report(summary, lang=st.session_state.get("lang","en"), amiri_path=str(AMIRI_PATH) if AMIRI_PATH.exists() else None)
+            pdf_bytes = generate_pdf_report(summary, lang=lang, amiri_path=str(AMIRI_PATH) if AMIRI_PATH.exists() else None)
             if pdf_bytes:
                 st.download_button("Download PDF report", data=pdf_bytes, file_name=f"NeuroEarly_Report_{now_ts()}.pdf", mime="application/pdf")
                 st.success("PDF generated.")
             else:
-                st.error("PDF generation failed — ensure reportlab is installed.")
+                st.error("PDF generation failed (reportlab not installed or font missing).")
         except Exception as e:
             st.error(f"PDF generation exception: {e}")
 
 else:
-    st.info("No processed results yet. Upload EDF and press 'Process EDF(s) and Analyze'.")
+    st.info("No results yet — upload EDF files and press 'Process & Analyze'.")
 
 st.markdown("---")
 st.markdown("Prepared by Golden Bird LLC — NeuroEarly Pro System, 2025")
