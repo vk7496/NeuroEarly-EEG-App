@@ -1,14 +1,13 @@
-# app_v5_fixed.py — NeuroEarly Pro (v5 fixed)
-# - Safe EDF reading (tempfile)
-# - Preserve non-zero metrics on error
-# - Arabic rendering fixes (arabic_reshaper + bidi)
-# - Keeps UI/UX, SHAP, topomaps, PDF structure as before
+# app.py — NeuroEarly Pro (v6 Professional)
+# Full bilingual (English default / Arabic optional RTL with Amiri),
+# Topomaps, Connectivity if available, SHAP support, PDF generation
+# Sidebar: patient info, meds, labs. Includes synthetic healthy EDF generator for testing.
 
 import os
 import io
 import sys
-import math
 import json
+import math
 import tempfile
 import traceback
 from pathlib import Path
@@ -21,32 +20,45 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-# try import neuro libs
+import streamlit as st
+
+# Optional heavy libs
 HAS_MNE = False
+HAS_PYEDFLIB = False
+HAS_REPORTLAB = False
+HAS_SHAP = False
+HAS_ARABIC = False
+
 try:
     import mne
     HAS_MNE = True
 except Exception:
     HAS_MNE = False
 
-HAS_PYEDFLIB = False
 try:
     import pyedflib
     HAS_PYEDFLIB = True
 except Exception:
     HAS_PYEDFLIB = False
 
-# connectivity via scipy if mne not available
-from scipy.signal import welch, coherence
+try:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import inch
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage, Table, TableStyle
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    HAS_REPORTLAB = True
+except Exception:
+    HAS_REPORTLAB = False
 
-# PDF and fonts
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
-from reportlab.lib.units import mm
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
+try:
+    import shap
+    HAS_SHAP = True
+except Exception:
+    HAS_SHAP = False
 
-# Arabic shaping
 try:
     import arabic_reshaper
     from bidi.algorithm import get_display
@@ -54,31 +66,13 @@ try:
 except Exception:
     HAS_ARABIC = False
 
-# SHAP optional
-HAS_SHAP = False
-try:
-    import shap
-    HAS_SHAP = True
-except Exception:
-    HAS_SHAP = False
-
-import streamlit as st
-
-# ----------------- Config -----------------
+# Paths — update if needed
 ROOT = Path(__file__).parent
 ASSETS = ROOT / "assets"
-AMIRI_TTF = ROOT / "Amiri-Regular.ttf"  # user confirmed path in repo root
-LOGO_PATH = ASSETS / "goldenbird_logo.png"  # user confirmed
-SHAP_JSON = ROOT / "shap_summary.json"
+LOGO_PATH = ASSETS / "goldenbird_logo.png"
+AMIRI_PATH = ROOT / "Amiri-Regular.ttf"
 
-# register Amiri font for reportlab if present
-if AMIRI_TTF.exists():
-    try:
-        pdfmetrics.registerFont(TTFont("Amiri", str(AMIRI_TTF)))
-    except Exception:
-        pass
-
-# constants
+# Constants and bands
 BANDS = {
     "Delta": (1.0, 4.0),
     "Theta": (4.0, 8.0),
@@ -87,469 +81,476 @@ BANDS = {
     "Gamma": (30.0, 45.0)
 }
 
-# ----------------- Utility functions -----------------
 def now_ts(fmt="%Y%m%d_%H%M%S"):
     return datetime.utcnow().strftime(fmt)
 
-def safe_read_edf_bytes(uploaded_file) -> Tuple[Optional['mne.io.Raw'], Optional[str]]:
-    """
-    Robust EDF reader:
-    - writes BytesIO to a temporary file on disk then calls mne.io.read_raw_edf
-    - handles pyedflib fallback (not as featureful) or returns error message
-    """
-    if not uploaded_file:
-        return None, "No file uploaded"
+# ------------------ Utilities ------------------
+def safe_text(text: str, lang="en"):
+    """Return text, reshape for Arabic if necessary."""
+    if lang.startswith("ar") and HAS_ARABIC:
+        shaped = arabic_reshaper.reshape(text)
+        bidi = get_display(shaped)
+        return bidi
+    return text
+
+def write_temp_file_from_upload(uploaded) -> Path:
+    """Save uploadedBytesIO to a temp file and return path (to avoid BytesIO issues)."""
+    suffix = Path(uploaded.name).suffix or ".edf"
+    tf = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     try:
-        # ensure bytes-like interface
-        data = uploaded_file.getbuffer() if hasattr(uploaded_file, "getbuffer") else uploaded_file.read()
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".edf") as tmp:
-            tmp.write(data)
-            tmp.flush()
-            tmp_path = tmp.name
-        # Try MNE first
+        tf.write(uploaded.getvalue())
+        tf.close()
+        return Path(tf.name)
+    except Exception as e:
+        try:
+            tf.close()
+        except:
+            pass
+        raise
+
+# ------------------ EDF Reading ------------------
+def read_edf_bytes(uploaded) -> Tuple[Optional[mne.io.Raw], Optional[str]]:
+    """
+    Try reading uploaded EDF using mne if available, else return None.
+    Returns (raw, msg)
+    """
+    if uploaded is None:
+        return None, "No file"
+    # Write to temp file and pass path to mne/pyedflib — avoids BytesIO issues and Info temp keys.
+    try:
+        tmp_path = write_temp_file_from_upload(uploaded)
+    except Exception as e:
+        return None, f"Failed to save uploaded file: {e}"
+    try:
         if HAS_MNE:
-            try:
-                raw = mne.io.read_raw_edf(tmp_path, preload=True, verbose=False)
-                os.remove(tmp_path)
-                return raw, None
-            except Exception as e_mne:
-                # fallback to pyedflib reading into numpy arrays if available
-                pass
-        if HAS_PYEDFLIB:
-            try:
-                # use pyedflib to read signals
-                f = pyedflib.EdfReader(tmp_path)
+            raw = mne.io.read_raw_edf(str(tmp_path), preload=True, verbose=False)
+            return raw, None
+        else:
+            # fallback using pyedflib to extract samples and create a RawArray if possible
+            if HAS_PYEDFLIB:
+                f = pyedflib.EdfReader(str(tmp_path))
                 n = f.signals_in_file
                 ch_names = f.getSignalLabels()
-                fs = f.getSampleFrequencies()
-                sigs = []
-                for i in range(n):
-                    sigs.append(f.readSignal(i))
+                sf = f.getSampleFrequency(0)
+                data = np.vstack([f.readSignal(i) for i in range(n)])
                 f._close()
-                os.remove(tmp_path)
-                # convert to MNE RawArray if possible for downstream convenience
+                raw = None
                 if HAS_MNE:
-                    info = mne.create_info(ch_names=list(ch_names), sfreq=float(fs[0]) if isinstance(fs, (list,tuple)) else float(fs), ch_types='eeg')
-                    raw = mne.io.RawArray(np.array(sigs), info)
+                    info = mne.create_info(ch_names=ch_names, sfreq=sf)
+                    raw = mne.io.RawArray(data, info)
                     return raw, None
                 else:
-                    # Return raw as tuple
-                    return (np.array(sigs), float(fs[0]) if isinstance(fs, (list,tuple)) else float(fs), list(ch_names)), None
-            except Exception as e_py:
-                try:
-                    os.remove(tmp_path)
-                except Exception:
-                    pass
-                return None, f"pyedflib read error: {e_py}"
-        # If reached here, no reader available
-        try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
-        return None, "No EDF reader available (install mne or pyedflib)"
+                    return None, "pyedflib read but mne not available to create Raw object."
+            else:
+                return None, "mne not available and pyedflib not installed."
     except Exception as e:
         return None, f"Error reading EDF: {e}"
-
-def compute_band_powers_from_raw(raw_or_tuple, bands=BANDS):
-    """
-    Accepts either an MNE Raw or a tuple from pyedflib path.
-    Returns DataFrame with relative and absolute powers per channel.
-    """
-    try:
-        if HAS_MNE and isinstance(raw_or_tuple, mne.io.BaseRaw):
-            raw = raw_or_tuple.copy().pick_types(eeg=True, meg=False)
-            sf = int(raw.info['sfreq'])
-            data, times = raw.get_data(return_times=True)
-            ch_names = raw.ch_names
-        else:
-            # tuple: (np_signals, sf, ch_names)
-            data, sf, ch_names = raw_or_tuple
-            data = np.array(data)
-        n_ch, n_samples = data.shape
-        res = []
-        for i in range(n_ch):
-            # Welch PSD
-            f, Pxx = welch(data[i,:], fs=sf, nperseg=min(2048, n_samples))
-            total = np.trapz(Pxx[(f>=1)&(f<=45)], f[(f>=1)&(f<=45)]) if np.any((f>=1)&(f<=45)) else np.nan
-            row = {"ch": ch_names[i]}
-            for name,(lo,hi) in bands.items():
-                mask = (f>=lo)&(f<hi)
-                val = np.trapz(Pxx[mask], f[mask]) if mask.any() else np.nan
-                row[f"{name}_abs"] = val
-                row[f"{name}_rel"] = (val/total) if total and not np.isnan(total) and total>0 else np.nan
-            res.append(row)
-        df = pd.DataFrame(res).set_index("ch")
-        return df
-    except Exception as e:
-        st.error(f"Band power calculation failed: {e}")
-        return pd.DataFrame()  # empty
-
-def compute_theta_alpha_ratio(df_bands):
-    try:
-        theta_mean = df_bands["Theta_rel"].mean(skipna=True)
-        alpha_mean = df_bands["Alpha_rel"].mean(skipna=True)
-        if np.isnan(theta_mean) or np.isnan(alpha_mean) or alpha_mean == 0:
-            return None
-        return float(theta_mean/alpha_mean)
-    except Exception:
-        return None
-
-def compute_alpha_asymmetry(df_bands, ch_left="F3", ch_right="F4"):
-    try:
-        a_left = df_bands.loc[ch_left, "Alpha_rel"] if ch_left in df_bands.index else np.nan
-        a_right= df_bands.loc[ch_right, "Alpha_rel"] if ch_right in df_bands.index else np.nan
-        if np.isnan(a_left) or np.isnan(a_right):
-            return None
-        return float(a_left - a_right)
-    except Exception:
-        return None
-
-def compute_fdi(df_bands, focal_ch):
-    """
-    Focal Delta Index = (mean delta power in focal region) / (mean delta power across all channels)
-    """
-    try:
-        if focal_ch not in df_bands.index:
-            return None
-        global_mean = df_bands["Delta_rel"].mean(skipna=True)
-        focal = df_bands.loc[focal_ch, "Delta_rel"]
-        if np.isnan(global_mean) or global_mean == 0:
-            return None
-        return float(focal / global_mean)
-    except Exception:
-        return None
-
-def compute_connectivity_matrix(raw_or_tuple, band=(8.0,13.0)):
-    """
-    Simple pairwise coherence matrix using scipy.signal.coherence (fallback).
-    If MNE is present, could use mne.connectivity.spectral_connectivity for better metrics.
-    Returns mean connectivity scalar (mean of matrix) and a PNG bytes image of matrix heatmap.
-    """
-    try:
-        if HAS_MNE and isinstance(raw_or_tuple, mne.io.BaseRaw):
-            raw = raw_or_tuple.copy().pick_types(eeg=True, meg=False)
-            sf = int(raw.info['sfreq'])
-            data, _ = raw.get_data(return_times=True)
-            ch_names = raw.ch_names
-        else:
-            data, sf, ch_names = raw_or_tuple
-        n_ch = data.shape[0]
-        conn = np.zeros((n_ch, n_ch))
-        for i in range(n_ch):
-            for j in range(i, n_ch):
-                try:
-                    f, Cxy = coherence(data[i,:], data[j,:], fs=sf, nperseg=min(2048, data.shape[1]))
-                    mask = (f >= band[0]) & (f <= band[1])
-                    if mask.any():
-                        val = np.mean(Cxy[mask])
-                    else:
-                        val = np.nan
-                except Exception:
-                    val = np.nan
-                conn[i,j] = conn[j,i] = val
-        mean_conn = np.nanmean(conn)
-        # make plot image
-        fig, ax = plt.subplots(figsize=(4,4))
-        im = ax.imshow(conn, interpolation='nearest', cmap='viridis')
-        ax.set_title(f"Connectivity {band[0]}-{band[1]}Hz")
-        ax.set_xticks(range(len(ch_names))); ax.set_xticklabels(ch_names, rotation=90, fontsize=6)
-        ax.set_yticks(range(len(ch_names))); ax.set_yticklabels(ch_names, fontsize=6)
-        fig.colorbar(im, ax=ax, fraction=0.03)
-        buf = io.BytesIO(); fig.tight_layout(); fig.savefig(buf, format='png', dpi=150); plt.close(fig); buf.seek(0)
-        return conn, mean_conn, buf.getvalue()
-    except Exception as e:
-        return None, None, None
-
-def load_shap_json(path: Path):
-    if not path.exists():
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return None
-
-def compute_final_risk(theta_alpha, phq_score, ad_score, fdi, connectivity):
-    """
-    Compute final risk between 0..100%
-    incorporates theta/alpha, questionnaire scores, FDI, and connectivity
-    """
-    def clamp01(x): return max(0.0, min(1.0, float(x)))
-    ta_norm = clamp01((theta_alpha or 0.0) / 2.0)
-    phq_norm = clamp01((phq_score or 0.0) / 27.0)
-    ad_norm = clamp01((ad_score or 0.0) / 24.0)
-    fdi_norm = clamp01(( (fdi or 0.0) - 1.0 ) / 3.0)
-    conn_factor = 1.0 - clamp01(connectivity if connectivity is not None else 0.5)
-    # weights
-    risk = (0.35*ta_norm + 0.25*ad_norm + 0.15*phq_norm + 0.15*fdi_norm + 0.10*conn_factor)
-    # rule: if focal delta index high -> at least moderate alert
-    if fdi is not None and fdi > 2.0:
-        risk = max(risk, 0.4)
-    return round(risk*100, 1)
-
-# ----------------- PDF Generation -----------------
-def reshaped_text(s: str, lang="en"):
-    if lang.startswith("ar") and HAS_ARABIC:
-        try:
-            reshaped = arabic_reshaper.reshape(s)
-            bidi = get_display(reshaped)
-            return bidi
-        except Exception:
-            return s
-    return s
-
-def generate_pdf_report(summary: Dict[str,Any], lang:str="en", amiri_path:Optional[str]=None,
-                        topo_images:Dict[str,bytes]=None, conn_image:bytes=None):
-    """
-    summary: dict containing computed metrics and text blocks
-    returns bytes of PDF
-    """
-    buffer = io.BytesIO()
-    c = canvas.Canvas(buffer, pagesize=A4)
-    width, height = A4
-    # header
-    try:
-        # draw logo
-        if LOGO_PATH.exists():
-            try:
-                c.drawImage(str(LOGO_PATH), 20*mm, height-30*mm, width=40*mm, preserveAspectRatio=True, mask='auto')
-            except Exception:
-                pass
-        c.setFont("Helvetica-Bold", 18)
-        title = "NeuroEarly Pro — Clinical QEEG Report" if lang=="en" else "تقرير NeuroEarly Pro"
-        title = reshaped_text(title, lang)
-        c.drawString(70*mm, height-25*mm, title)
-        c.setFont("Helvetica", 9)
-        c.drawString(70*mm, height-30*mm, f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
-        # patient block (no name)
-        c.setFont("Helvetica-Bold", 10)
-        c.drawString(20*mm, height-40*mm, reshaped_text("Patient ID:", lang))
-        c.setFont("Helvetica", 10)
-        c.drawString(40*mm, height-40*mm, str(summary.get("patient_id","N/A")))
-        c.drawString(110*mm, height-40*mm, reshaped_text("DOB:", lang))
-        c.drawString(125*mm, height-40*mm, str(summary.get("dob","N/A")))
-        # Final ML Risk prominently
-        c.setFont("Helvetica-Bold", 14)
-        c.drawString(20*mm, height-50*mm, reshaped_text("Final ML Risk Score:", lang))
-        c.drawString(85*mm, height-50*mm, f"{summary.get('final_risk','N/A')}%")
-    except Exception:
+    finally:
+        # keep tmp file (some environments require it), you can remove it if desired
         pass
 
-    y = height - 60*mm
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(20*mm, y, reshaped_text("QEEG Key Metrics", lang))
-    y -= 8*mm
-    c.setFont("Helvetica", 9)
-    # write metrics table (safe formatting)
-    metrics = summary.get("metrics", {})
-    for k,v in metrics.items():
-        try:
-            if isinstance(v, float):
-                txt = f"{k}: {v:.4f}"
-            else:
-                txt = f"{k}: {v}"
-        except Exception:
-            txt = f"{k}: {v}"
-        c.drawString(22*mm, y, reshaped_text(txt, lang))
-        y -= 6*mm
-        if y < 40*mm:
-            c.showPage(); y = height - 20*mm
-    # insert topomaps images if any
-    if topo_images:
-        for band, imgbytes in topo_images.items():
-            try:
-                if imgbytes:
-                    c.showPage()
-                    c.drawImage(io.BytesIO(imgbytes), 20*mm, height/2-60*mm, width=170*mm, preserveAspectRatio=True, mask='auto')
-                    c.setFont("Helvetica-Bold", 12)
-                    c.drawString(20*mm, height/2-70*mm, reshaped_text(f"Topomap - {band}", lang))
-            except Exception:
-                pass
-    # connection image
-    if conn_image:
-        try:
-            c.showPage()
-            c.drawImage(io.BytesIO(conn_image), 20*mm, height/2-60*mm, width=170*mm, preserveAspectRatio=True, mask='auto')
-            c.setFont("Helvetica-Bold", 12)
-            c.drawString(20*mm, height/2-70*mm, reshaped_text("Connectivity (Alpha)", lang))
-        except Exception:
-            pass
+# ------------------ Compute Band Powers ------------------
+def compute_band_powers(raw: mne.io.Raw, bands=BANDS) -> pd.DataFrame:
+    """Return relative and absolute band powers per channel as DataFrame."""
+    picks = mne.pick_types(raw.info, eeg=True, meg=False, exclude='bads')
+    data, times = raw.get_data(picks=picks, return_times=True)
+    ch_names = [raw.ch_names[p] for p in picks]
+    sf = raw.info['sfreq']
+    # Use Welch PSD
+    from scipy.signal import welch
+    res = []
+    for i, ch in enumerate(data):
+        f, Pxx = welch(ch, fs=sf, nperseg=int(sf*2))
+        total_power = np.trapz(Pxx, f)
+        row = {"ch": ch_names[i], "total": total_power}
+        for bname,(lo,hi) in bands.items():
+            mask = (f >= lo) & (f <= hi)
+            band_power = np.trapz(Pxx[mask], f[mask]) if mask.any() else 0.0
+            row[f"{bname}_abs"] = band_power
+            row[f"{bname}_rel"] = (band_power / total_power) if total_power>0 else 0.0
+        res.append(row)
+    df = pd.DataFrame(res).set_index("ch")
+    return df
 
-    # XAI section (SHAP)
-    c.showPage()
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(20*mm, height-30*mm, reshaped_text("Explainable AI (Top contributors)", lang))
-    # if SHAP plot image included in summary, draw it
-    shap_img = summary.get("shap_img")
-    if shap_img:
+# ------------------ Topomap Image Generator ------------------
+def generate_topomap_image(raw: mne.io.Raw, band: Tuple[float,float], ch_names=None, cmap="RdBu_r") -> Optional[bytes]:
+    """Compute band-power per channel and return PNG bytes of topomap."""
+    try:
+        sf = raw.info['sfreq']
+        picks = mne.pick_types(raw.info, eeg=True, meg=False, exclude='bads')
+        chs = [raw.ch_names[p] for p in picks]
+        data, _ = raw.get_data(picks=picks, return_times=True)
+        # Compute mean band power per channel using welch
+        from scipy.signal import welch
+        vals=[]
+        for ch in data:
+            f, Pxx = welch(ch, fs=sf, nperseg=int(sf*2))
+            mask = (f >= band[0]) & (f <= band[1])
+            power = np.trapz(Pxx[mask], f[mask]) if mask.any() else 0.0
+            vals.append(power)
+        vals = np.array(vals)
+        # Normalize for plotting
+        if vals.max() != 0:
+            vals = vals / np.nanmax(vals)
+        # Need montages for topomap coordinates
         try:
-            c.drawImage(io.BytesIO(shap_img), 20*mm, height/2-60*mm, width=170*mm, preserveAspectRatio=True, mask='auto')
+            montage = mne.channels.make_standard_montage('standard_1020')
+            info = mne.pick_info(raw.info, picks)
+            # create Evoked-like object
+            evoked = mne.EvokedArray(vals.reshape(-1,1), info, tmin=0.0)
+            evoked.set_montage(montage, match_case=False)
+            fig = evoked.plot_topomap(times=0.0, ch_type='eeg', show=False)
+            buf = io.BytesIO()
+            fig.savefig(buf, format='png', bbox_inches='tight')
+            plt.close(fig)
+            buf.seek(0)
+            return buf.getvalue()
+        except Exception:
+            # fallback: simple scatter plot on 2D approximate layout
+            fig, ax = plt.subplots(figsize=(4,3))
+            ax.bar(range(len(vals)), vals)
+            ax.set_title(f"Band {band[0]}-{band[1]} Hz (approx)")
+            buf = io.BytesIO()
+            fig.tight_layout()
+            fig.savefig(buf, format='png')
+            plt.close(fig)
+            buf.seek(0)
+            return buf.getvalue()
+    except Exception as e:
+        print("Topomap failed:", e)
+        return None
+
+# ------------------ SHAP visualization ------------------
+def load_shap_summary(path=ROOT/"shap_summary.json"):
+    try:
+        if path.exists():
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return None
+
+# ------------------ PDF generator ------------------
+def generate_pdf_report(summary: dict, lang="en", amiri_path: Optional[Path]=AMIRI_PATH) -> Optional[bytes]:
+    """Create bilingual PDF report and return bytes (requires reportlab)."""
+    if not HAS_REPORTLAB:
+        return None
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=36, bottomMargin=36, leftMargin=44, rightMargin=44)
+    styles = getSampleStyleSheet()
+    base_font = "Helvetica"
+    if amiri_path and amiri_path.exists():
+        try:
+            pdfmetrics.registerFont(TTFont("Amiri", str(amiri_path)))
+            base_font = "Amiri"
+        except Exception as e:
+            print("Amiri reg failed:", e)
+    styles.add(ParagraphStyle(name="TitleBlue", fontName=base_font, fontSize=16, textColor=colors.HexColor("#0b63d6"), alignment=1, spaceAfter=8))
+    styles.add(ParagraphStyle(name="H2", fontName=base_font, fontSize=12, textColor=colors.HexColor("#0b63d6"), spaceAfter=6))
+    styles.add(ParagraphStyle(name="Body", fontName=base_font, fontSize=10, leading=14))
+    styles.add(ParagraphStyle(name="Note", fontName=base_font, fontSize=9, textColor=colors.grey))
+    story = []
+    # Header with logo and title
+    header_table_data = []
+    left = Paragraph("<b>NeuroEarly Pro — Clinical</b>", styles["TitleBlue"])
+    if LOGO_PATH.exists():
+        img = RLImage(str(LOGO_PATH), width=1.0*inch, height=1.0*inch)
+        header_table_data = [[left, img]]
+        t = Table(header_table_data, colWidths=[4.8*inch, 1.0*inch])
+    else:
+        header_table_data = [[left]]
+        t = Table(header_table_data)
+    t.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"MIDDLE")]))
+    story.append(t)
+    story.append(Spacer(1,12))
+    # Patient summary
+    patient_info = summary.get("patient_info", {})
+    story.append(Paragraph(safe_text("Patient summary", lang), styles["H2"]))
+    rows = [["Field", "Value"]]
+    rows.append(["Patient ID", patient_info.get("id","")])
+    rows.append(["DOB", patient_info.get("dob","")])
+    rows.append(["Sex", patient_info.get("sex","")])
+    rows.append(["Meds", patient_info.get("meds","")])
+    tbl = Table(rows, colWidths=[2.5*inch, 3.5*inch])
+    tbl.setStyle(TableStyle([("GRID",(0,0),(-1,-1),0.25,colors.grey),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#eef7ff"))]))
+    story.append(tbl)
+    story.append(Spacer(1,6))
+    # Metrics table
+    metrics = summary.get("metrics", {})
+    story.append(Paragraph(safe_text("QEEG Key Metrics", lang), styles["H2"]))
+    if metrics:
+        rows = [["Metric", "Value"]]
+        for k,v in metrics.items():
+            rows.append([k, str(v)])
+        t2 = Table(rows, colWidths=[3.5*inch,2.5*inch])
+        t2.setStyle(TableStyle([("GRID",(0,0),(-1,-1),0.25,colors.grey),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#eef7ff"))]))
+        story.append(t2)
+        story.append(Spacer(1,8))
+    # Insert bar image (Theta/Alpha)
+    if summary.get("normative_bar"):
+        try:
+            bar_bytes = summary["normative_bar"]
+            story.append(Paragraph(safe_text("Normative Comparison", lang), styles["H2"]))
+            story.append(Spacer(1,4))
+            story.append(RLImage(io.BytesIO(bar_bytes), width=5.5*inch, height=3.0*inch))
+            story.append(Spacer(1,6))
         except Exception:
             pass
-    # Footer
-    c.setFont("Helvetica", 8)
-    c.drawString(20*mm, 15*mm, reshaped_text("Designed by Golden Bird LLC", lang))
-    c.save()
+    # Topomaps
+    topo_imgs = summary.get("topo_images", {})
+    if topo_imgs:
+        story.append(Paragraph(safe_text("Topography Maps (bands)", lang), styles["H2"]))
+        imgs = [RLImage(io.BytesIO(b), width=2.6*inch, height=1.6*inch) for b in topo_imgs.values() if b]
+        # arrange two per row
+        rows=[]
+        row=[]
+        for im in imgs:
+            row.append(im)
+            if len(row)==2:
+                rows.append(row); row=[]
+        if row:
+            rows.append(row)
+        for r in rows:
+            t = Table([r], colWidths=[3.0*inch]*len(r))
+            t.setStyle(TableStyle([("GRID",(0,0),(-1,-1),0.25,colors.grey)]))
+            story.append(t)
+            story.append(Spacer(1,6))
+    # SHAP
+    if summary.get("shap_img"):
+        try:
+            story.append(Paragraph(safe_text("Top contributors (SHAP)", lang), styles["H2"]))
+            story.append(RLImage(io.BytesIO(summary["shap_img"]), width=5.5*inch, height=2.2*inch))
+            story.append(Spacer(1,6))
+        except Exception:
+            pass
+    # Recommendations & footer
+    story.append(Paragraph(safe_text("Structured Clinical Recommendations", lang), styles["H2"]))
+    for r in summary.get("recommendations", []):
+        story.append(Paragraph(r, styles["Body"]))
+    story.append(Spacer(1,12))
+    story.append(Paragraph(safe_text("Prepared by Golden Bird LLC — NeuroEarly Pro", lang), styles["Note"]))
+    # build
+    doc.build(story)
     buffer.seek(0)
     return buffer.getvalue()
 
-# ----------------- Streamlit UI -----------------
-st.set_page_config(page_title="NeuroEarly Pro", layout="wide")
-# Sidebar on left: language + patient info
-with st.sidebar:
-    st.image(str(LOGO_PATH) if LOGO_PATH.exists() else None, use_column_width=True)
-    st.title("NeuroEarly Pro")
-    lang = st.selectbox("Language / اللغة", options=["English","Arabic"], index=0)
-    report_lang = "ar" if lang=="Arabic" else "en"
-    st.markdown("---")
-    st.header("Patient")
-    patient_id = st.text_input("Patient ID", value="H-0001")
-    dob = st.date_input("Date of birth", value=date(1995,1,1), min_value=date(1900,1,1), max_value=date(2025,12,31))
-    meds = st.text_area("Medications (comma separated)", value="")
-    labs = st.text_area("Relevant labs (B12, TSH, etc.)", value="")
-    st.markdown("---")
-    st.header("Upload")
-    edf_file = st.file_uploader("Upload EDF file", type=["edf","EDF"], accept_multiple_files=False)
-    st.markdown("---")
-    if st.button("Run Processing"):
-        st.session_state["run_processing"] = not st.session_state.get("run_processing", False)
+# ------------------ UI / Main ------------------
+st.set_page_config(page_title="NeuroEarly Pro — Clinical", layout="wide")
+# Layout: sidebar for patient info / upload / language; main area for console + visualizations
 
-# Main columns
+# Sidebar
+with st.sidebar:
+    st.image(str(LOGO_PATH)) if LOGO_PATH.exists() else None
+    st.header("Settings")
+    lang = st.selectbox("Language / اللغة", ["English", "العربية"])
+    lang_code = "ar" if lang.startswith("ع") else "en"
+    pid = st.text_input("Patient ID")
+    dob = st.date_input("Date of birth", value=date(1980,1,1), min_value=date(1900,1,1), max_value=date(2025,12,31))
+    sex = st.selectbox("Sex / الجنس", ["Unknown","Male","Female"])
+    meds = st.text_area("Current meds (one per line)")
+    labs = st.text_area("Relevant labs (B12, TSH, etc.)")
+    st.markdown("---")
+    st.subheader("Upload")
+    uploaded = st.file_uploader("Upload EDF file", type=["edf","EDF"], accept_multiple_files=False)
+    st.button("Generate synthetic healthy EDF", on_click=None)  # placeholder, below we provide an actual generator
+    # Questionnaire: PHQ-9 (simplified) and Alzheimer screening (short)
+    st.markdown("---")
+    st.subheader("Questionnaires")
+    st.write("PHQ-9 (brief)")
+    phq = {}
+    phq[1] = st.radio("Q1", [0,1,2,3], index=0, key="q1")
+    phq[2] = st.radio("Q2", [0,1,2,3], index=0, key="q2")
+    phq[3] = st.radio("Q3", [0,1,2,3], index=0, key="q3")  # sensitive question
+    phq[4] = st.radio("Q4", [0,1,2,3], index=0, key="q4")
+    phq[5] = st.radio("Q5", [0,1,2,3], index=0, key="q5")  # sensitive question
+    phq[6] = st.radio("Q6", [0,1,2,3], index=0, key="q6")
+    phq[7] = st.radio("Q7", [0,1,2,3], index=0, key="q7")
+    phq[8] = st.radio("Q8", [0,1,2,3], index=0, key="q8")  # sensitive question
+    phq[9] = st.radio("Q9", [0,1,2,3], index=0, key="q9")
+    st.markdown("---")
+
+# Main layout
+st.title("NeuroEarly Pro — Clinical & Research")
+st.write("EEG / QEEG analysis, Topomaps, Explainable AI — research demo")
 col1, col2 = st.columns([1,2])
 
 with col1:
     st.header("Console")
-    if "console" not in st.session_state:
-        st.session_state["console"] = ""
-    st.text_area("Log", value=st.session_state["console"], height=400)
-    # placeholder for raw channel viewer
-    ch_select = st.selectbox("Select channel to inspect", options=["--"] + ([]), index=0)
+    console = st.empty()
+    console.info("Ready. Upload EDF and press 'Process EDF' in the left panel.")
 
 with col2:
-    st.header("Main")
-    st.markdown("## Upload & Quick stats")
-    if edf_file is None:
-        st.info("Upload an EDF to begin.")
-    else:
-        raw, err = safe_read_edf_bytes(edf_file)
-        if raw is None:
-            st.error(f"EDF read error: {err}")
+    st.header("Upload & Quick stats")
+    if uploaded:
+        console.info("Saving and reading EDF file... please wait")
+        raw, err = read_edf_bytes(uploaded)
+        if err:
+            st.error(err)
+        elif raw is None:
+            st.error("EDF read returned no Raw object.")
         else:
-            st.success("EDF loaded successfully.")
-            # compute bands
-            df_bands = compute_band_powers_from_raw(raw)
-            st.subheader("QEEG Band summary (relative power)")
-            if not df_bands.empty:
-                st.dataframe(df_bands.round(4))
-            else:
-                st.info("Band power summary not available.")
-
-            # compute metrics
-            theta_alpha = compute_theta_alpha_ratio(df_bands)
-            alpha_asym = compute_alpha_asymmetry(df_bands)
-            # choose focal channel heuristic: channel with highest delta_rel
-            focal_ch = None
+            st.success(f"EDF loaded successfully. Channels: {len(raw.ch_names)}; sfreq: {raw.info['sfreq']}")
+            # compute band powers
             try:
-                focal_ch = df_bands["Delta_rel"].idxmax()
-            except Exception:
-                focal_ch = None
-            fdi_value = compute_fdi(df_bands, focal_ch) if focal_ch else None
-
-            st.markdown("---")
-            st.subheader("Connectivity")
-            conn_mat, mean_conn, conn_img = compute_connectivity_matrix(raw, band=BANDS["Alpha"])
-            if conn_img:
-                st.image(conn_img, caption="Alpha connectivity", use_column_width=True)
-            else:
-                st.info("Connectivity not available (install required libs for best results).")
-
-            # SHAP
-            shap_data = load_shap_json(SHAP_JSON)
-            st.subheader("Explainable AI (XAI)")
+                df_bands = compute_band_powers(raw)
+                st.subheader("QEEG Band summary (relative power)")
+                st.dataframe(df_bands.round(4))
+            except Exception as e:
+                st.error(f"Band power computation failed: {e}")
+            # topomaps generation
+            topo_images = {}
+            for name,band in BANDS.items():
+                img = generate_topomap_image(raw, band)
+                topo_images[name] = img
+            # SHAP visualization
+            shap_data = load_shap_summary(ROOT/"shap_summary.json")
+            shap_img_bytes = None
             if shap_data:
-                try:
-                    # choose model key by heuristic
-                    model_key = "depression_global"
-                    if theta_alpha and theta_alpha > 1.3:
-                        model_key = "alzheimers_global"
-                    feats = shap_data.get(model_key, {})
-                    if feats:
-                        s = pd.Series(feats).abs().sort_values(ascending=False)
-                        st.bar_chart(s.head(12))
-                        # prepare small shap image for PDF
-                        # we can render bar chart to image
-                        fig, ax = plt.subplots(figsize=(6,3))
-                        s.head(12).plot.bar(ax=ax)
-                        ax.set_title("SHAP - Top features")
-                        buf = io.BytesIO(); fig.tight_layout(); fig.savefig(buf, format='png'); plt.close(fig); buf.seek(0)
-                        shap_img_bytes = buf.getvalue()
-                    else:
-                        st.info("SHAP loaded but no matching model key.")
-                        shap_img_bytes = None
-                except Exception as e:
-                    st.warning(f"XAI load error: {e}")
-                    shap_img_bytes = None
-            else:
-                st.info("No shap_summary.json found. Upload to enable XAI visualizations.")
-                shap_img_bytes = None
-
-            # Final risk
-            phq_score = 0  # placeholder: collect PHQ-9 from UI if implemented
-            ad_score = 0   # placeholder
-            final_risk = compute_final_risk(theta_alpha or 0.0, phq_score, ad_score, fdi_value or 0.0, mean_conn or 0.0)
-
-            # Show quick metrics
-            st.markdown("### Quick Metrics")
-            st.write({
-                "Theta/Alpha (global)": theta_alpha,
-                "Alpha Asymmetry (F3-F4)": alpha_asym,
-                "Focal channel (Delta)": focal_ch,
-                "FDI": fdi_value,
-                "Mean Connectivity (Alpha)": mean_conn,
-                "Final ML Risk (%)": final_risk
-            })
-
-            # Generate PDF button
-            if st.button("Generate PDF Report"):
-                summary = {
-                    "patient_id": patient_id,
-                    "dob": dob.isoformat() if isinstance(dob, date) else str(dob),
-                    "metrics": {
-                        "theta_alpha_ratio": theta_alpha,
-                        "alpha_asymmetry_f3_f4": alpha_asym,
-                        "focal_channel": focal_ch,
-                        "fdi": fdi_value,
-                        "mean_connectivity_alpha": mean_conn
-                    },
-                    "final_risk": final_risk,
-                    "shap_img": shap_img_bytes
-                }
-                topo_imgs = {}
-                # create simple topomap approximations per band (if mne available)
-                if HAS_MNE and isinstance(raw, mne.io.BaseRaw):
-                    try:
-                        raw2 = raw.copy().pick_types(eeg=True)
-                        for band_name,(lo,hi) in BANDS.items():
-                            try:
-                                psds, freqs = mne.time_frequency.psd_welch(raw2, fmin=lo, fmax=hi, n_overlap=0, verbose=False)
-                                vals = psds.mean(axis=1)
-                            except Exception:
-                                vals = np.zeros(len(raw2.ch_names))
-                            # generate a small image (matplotlib heatmap)
-                            fig, ax = plt.subplots(figsize=(4,2))
-                            im = ax.bar(range(len(vals)), vals)
-                            ax.set_title(f"Band {band_name}")
-                            buf = io.BytesIO(); fig.tight_layout(); fig.savefig(buf, format='png'); plt.close(fig); buf.seek(0)
-                            topo_imgs[band_name] = buf.getvalue()
-                    except Exception:
-                        topo_imgs = None
+                # build a simple bar chart for top features of a relevant model key if present
+                model_key = "depression_global" if np.mean([phq[i] for i in range(1,10)]) > 2.0 else "alzheimers_global"
+                features = shap_data.get(model_key, {})
+                if features:
+                    s = pd.Series(features).abs().sort_values(ascending=False)
+                    fig = plt.figure(figsize=(6,2.2))
+                    ax = fig.add_subplot(111)
+                    s.head(10).plot.bar(ax=ax)
+                    ax.set_title("Top SHAP contributors")
+                    buf = io.BytesIO(); fig.tight_layout(); fig.savefig(buf, format='png'); plt.close(fig); buf.seek(0)
+                    shap_img_bytes = buf.getvalue()
+            # Normative bar (theta/alpha + alpha asymmetry)
+            try:
+                # compute theta/alpha global ratio
+                theta = df_bands["Theta_rel"].mean()
+                alpha = df_bands["Alpha_rel"].mean()
+                tar = theta/alpha if alpha>0 else 0.0
+                # build a simple bar chart with healthy range
+                fig, ax = plt.subplots(figsize=(5,3))
+                ax.bar([0],[tar], width=0.6)
+                ax.set_ylim(0, max(1.5, tar+0.2))
+                ax.set_xticks([0]); ax.set_xticklabels(["Theta/Alpha ratio"])
+                # shading good vs bad
+                ax.axhspan(1.0, 1.5, facecolor='red', alpha=0.2)
+                ax.axhspan(0.0, 0.8, facecolor='white', alpha=0.2)
+                buf = io.BytesIO(); fig.tight_layout(); fig.savefig(buf, format='png'); plt.close(fig); buf.seek(0)
+                normative_bar = buf.getvalue()
+            except Exception:
+                normative_bar = None
+            # create summary dict for PDF
+            summary = {
+                "patient_info": {"id": pid, "dob": str(dob), "sex": sex, "meds": meds},
+                "metrics": {
+                    "theta_alpha_ratio": float(theta/alpha if alpha>0 else 0.0),
+                    "mean_connectivity_alpha": 0.0  # placeholder if no conn computed
+                },
+                "topo_images": topo_images,
+                "shap_img": shap_img_bytes,
+                "normative_bar": normative_bar,
+                "recommendations": [
+                    "This is an automated screening report. Clinical correlation required.",
+                    "Consider MRI if focal delta index > 2 or extreme asymmetry.",
+                    "Follow-up in 3-6 months for moderate risk cases."
+                ],
+                "created": now_ts()
+            }
+            # Try connectivity if mne & sklearn available (simple coherence)
+            try:
+                if HAS_MNE:
+                    # compute connectivity (coherence) for alpha as a simple mean
+                    from mne.connectivity import spectral_connectivity
+                    con, freqs, times, n_epochs, n_tapers = spectral_connectivity([raw], method="coh", mode='fourier', sfreq=raw.info['sfreq'], fmin=8.0, fmax=13.0, faverage=True, verbose=False)
+                    mean_conn = np.nanmean(con)
+                    summary["metrics"]["mean_connectivity_alpha"] = float(mean_conn)
+                    # render image for connectivity
+                    fig = plt.figure(figsize=(4,3)); ax = fig.add_subplot(111)
+                    ax.imshow(con.squeeze(), cmap='viridis'); fig.colorbar(ax.images[0], ax=ax, fraction=0.046, pad=0.04)
+                    ax.set_title("Connectivity (alpha)")
+                    buf = io.BytesIO(); fig.tight_layout(); fig.savefig(buf, format='png'); plt.close(fig); buf.seek(0)
+                    summary["connectivity_image"] = buf.getvalue()
                 else:
-                    # fallback: no topomap
-                    topo_imgs = None
-
-                pdf_bytes = generate_pdf_report(summary, lang=report_lang, amiri_path=str(AMIRI_TTF) if AMIRI_TTF.exists() else None,
-                                                topo_images=topo_imgs, conn_image=conn_img)
+                    summary["connectivity_image"] = None
+            except Exception as e:
+                summary["connectivity_image"] = None
+            # PDF generation button
+            pdf_bytes = generate_pdf_report(summary, lang=lang_code, amiri_path=AMIRI_PATH if AMIRI_PATH.exists() else None)
+            if pdf_bytes:
+                st.download_button("Download PDF report", data=pdf_bytes, file_name=f"NeuroEarly_Report_{now_ts()}.pdf", mime="application/pdf")
                 st.success("PDF generated.")
-                st.download_button("Download PDF", data=pdf_bytes, file_name=f"NeuroEarly_Report_{now_ts()}.pdf", mime="application/pdf")
+            else:
+                st.error("PDF generation failed - ensure reportlab is installed.")
+            # show visuals
+            st.subheader("Topography maps")
+            cols = st.columns(2)
+            idx=0
+            for bname, img in topo_images.items():
+                with cols[idx%2]:
+                    st.markdown(f"**{bname}**")
+                    if img:
+                        st.image(img, use_column_width=True)
+                    else:
+                        st.info("Not available")
+                idx+=1
+            if shap_img_bytes:
+                st.subheader("SHAP contributors")
+                st.image(shap_img_bytes, use_column_width=True)
+    else:
+        st.info("No file uploaded. Use sidebar to upload an EDF or generate a synthetic test file.")
 
-# end of app
+# ------------------ Synthetic EDF generator (for local/Colab testing) ------------------
+def generate_synthetic_edf(duration_s=120, sf=500, n_channels=19) -> bytes:
+    """
+    Generate a synthetic EDF-like binary using pyedflib if available.
+    Channels: default 19 standard names (subset).
+    """
+    ch_names = ["Fp1","Fp2","F3","F4","C3","C4","P3","P4","O1","O2","F7","F8","T7","T8","Fz","Cz","Pz","Oz","T9"][:n_channels]
+    samples = duration_s * sf
+    t = np.arange(int(samples))/sf
+    signals = []
+    # create multi-band synthetic EEG-like signals
+    for i in range(n_channels):
+        # mixture of alpha(10Hz), theta(6Hz), delta(2Hz), beta(20Hz), and noise
+        sig = 5*np.sin(2*np.pi*10*t + i) * np.exp(-((i%5)/5.0))  # alpha component
+        sig += 2*np.sin(2*np.pi*6*t + i*0.5)
+        sig += 1.5*np.sin(2*np.pi*2*t + i*0.2)
+        sig += 0.5*np.sin(2*np.pi*20*t + i*0.1)
+        sig += 0.5*np.random.randn(len(t))
+        signals.append(sig)
+    signals = np.vstack(signals)
+    if HAS_PYEDFLIB:
+        tmpfile = tempfile.NamedTemporaryFile(delete=False, suffix=".edf")
+        fname = tmpfile.name
+        tmpfile.close()
+        f = pyedflib.EdfWriter(fname, n_channels)
+        channel_info = []
+        for ch in ch_names:
+            ch_dict = {'label': ch, 'dimension': 'uV', 'sample_rate': sf, 'physical_min': -500.0, 'physical_max': 500.0, 'digital_min': -32768, 'digital_max': 32767, 'transducer': '', 'prefilter': ''}
+            channel_info.append(ch_dict)
+        f.setSignalHeaders(channel_info)
+        f.writeSamples(signals)
+        f.close()
+        with open(fname, "rb") as fh:
+            b = fh.read()
+        try:
+            os.remove(fname)
+        except:
+            pass
+        return b
+    else:
+        # fallback: write raw numpy as .npy in memory for download (not EDF)
+        buf = io.BytesIO()
+        np.save(buf, signals)
+        buf.seek(0)
+        return buf.getvalue()
+
+# Synthetic EDF download UI (below the main area)
+st.sidebar.markdown("---")
+st.sidebar.subheader("Testing tools")
+dur = st.sidebar.number_input("Synthetic EDF duration (s)", min_value=30, max_value=600, value=120)
+sfreq = st.sidebar.selectbox("Sample rate", [250, 500], index=1)
+if st.sidebar.button("Create & download synthetic EDF"):
+    try:
+        edf_bytes = generate_synthetic_edf(duration_s=dur, sf=sfreq, n_channels=19)
+        st.sidebar.download_button("Download synthetic EDF", data=edf_bytes, file_name=f"synthetic_{dur}s_{sfreq}Hz.edf" if HAS_PYEDFLIB else f"synthetic_{dur}s_{sfreq}Hz.npy", mime="application/octet-stream")
+    except Exception as e:
+        st.sidebar.error(f"Could not generate synthetic EDF: {e}")
+
+# End of app
