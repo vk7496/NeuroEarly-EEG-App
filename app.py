@@ -636,7 +636,8 @@ if analyze:
                     vals = df_bands[col].values
                 else:
                     vals = df_bands.get(f"{b}_abs", pd.Series(np.zeros(data.shape[0]))).values
-                topo_imgs[b] = topomap_png_from_vals(vals, band_name=b)
+                topo_imgs[b] = topomap_png_from_vals(vals, ch_names, band_name=b)
+
             # connectivity
             conn_img = None
             conn_matrix = None
