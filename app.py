@@ -235,24 +235,58 @@ def compute_band_powers(data: np.ndarray, sf: float, bands=BANDS) -> pd.DataFram
 # ----------------------------
 # topomap rendering (grid fallback) -> returns PNG bytes
 # ----------------------------
-def topomap_png_from_vals(vals: np.ndarray, band_name:str="Band"):
+def topomap_png_from_vals(vals, ch_names, band_name="Band"):
     try:
-        arr = np.asarray(vals).astype(float)
-        n = len(arr)
-        side = int(np.ceil(np.sqrt(n)))
-        grid_flat = np.full(side*side, np.nan)
-        grid_flat[:n] = arr
-        grid = grid_flat.reshape(side, side)
-        fig,ax = plt.subplots(figsize=(4,3))
-        im = ax.imshow(grid, cmap="RdBu_r", interpolation="nearest", origin='upper')
+        import numpy as np
+        import matplotlib.pyplot as plt
+        import io
+        from scipy.interpolate import griddata
+
+        # 10-20 approximate normalized coordinates
+        coords = {
+            "Fp1": (-0.5, 1.0), "Fp2": (0.5, 1.0),
+            "F7": (-1.0, 0.6), "F3": (-0.4, 0.6), "Fz": (0.0, 0.6), "F4": (0.4, 0.6), "F8": (1.0, 0.6),
+            "T7": (-1.1, 0.2), "C3": (-0.4, 0.2), "Cz": (0.0, 0.2), "C4": (0.4, 0.2), "T8": (1.1, 0.2),
+            "P7": (-1.0, -0.3), "P3": (-0.4, -0.3), "Pz": (0.0, -0.3), "P4": (0.4, -0.3), "P8": (1.0, -0.3),
+            "O1": (-0.5, -0.8), "O2": (0.5, -0.8)
+        }
+
+        xs, ys, zs = [], [], []
+
+        for ch, v in zip(ch_names, vals):
+            if ch in coords:
+                xs.append(coords[ch][0])
+                ys.append(coords[ch][1])
+                zs.append(v)
+
+        xs = np.array(xs)
+        ys = np.array(ys)
+        zs = np.array(zs)
+
+        # Grid for interpolation
+        grid_x, grid_y = np.mgrid[-1.2:1.2:200j, -1.2:1.2:200j]
+        grid_z = griddata((xs, ys), zs, (grid_x, grid_y), method='cubic', fill_value=np.nan)
+
+        fig, ax = plt.subplots(figsize=(4,4))
+        im = ax.imshow(
+            grid_z.T, origin="lower", cmap="RdBu_r",
+            extent=[-1.2, 1.2, -1.2, 1.2]
+        )
         ax.set_title(f"{band_name} Topomap")
-        ax.axis('off')
+        ax.axis("off")
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        buf = io.BytesIO(); fig.tight_layout(); fig.savefig(buf,format='png',dpi=150); plt.close(fig); buf.seek(0)
+
+        buf = io.BytesIO()
+        fig.tight_layout()
+        fig.savefig(buf, format="png", dpi=160)
+        plt.close(fig)
+        buf.seek(0)
         return buf.getvalue()
+
     except Exception as e:
         print("topomap error:", e)
         return None
+
 
 # ----------------------------
 # connectivity: try coherence (scipy) then fallback to Pearson corr
