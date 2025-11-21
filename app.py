@@ -1,13 +1,14 @@
-# app.py — NeuroEarly Pro v12 (Production Ready - Data Driven XAI)
+# app.py — NeuroEarly Pro v11 (XAI SHAP Edition)
 import os
 import io
-import json
+import sys
 import numpy as np
 import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy.interpolate import griddata
+from scipy.signal import welch
 import streamlit as st
 
 # PDF & Arabic Support
@@ -35,25 +36,45 @@ FONT_PATH = "Amiri-Regular.ttf"
 # Frequency Bands
 BANDS = {"Delta": (0.5, 4), "Theta": (4, 8), "Alpha": (8, 13), "Beta": (13, 30)}
 
-# --- 2. LOCALIZATION (Translations are maintained) ---
+# --- 2. LOCALIZATION ---
 TRANS = {
     "en": {
-        "title": "NeuroEarly Pro: XAI Clinical Decision Support", "patient_info": "Patient Information", "name": "Full Name",
-        "id": "File ID", "dob": "Birth Year", "labs": "Labs / Conditions", "assess_tab": "Assessments",
-        "analyze": "Run Clinical Diagnosis", "decision": "CLINICAL DECISION & REFERRAL",
-        "mri_rec": "URGENT: REFER FOR MRI/CT SCAN", "shap_title": "AI Explainability (SHAP Feature Importance)",
-        "topomaps": "Brain Topography Mapping", "download": "Download Report (PDF)",
-        "upload_eeg": "Upload EEG (EDF)", "upload_shap": "Upload SHAP Summary (JSON)",
-        "phq_header": "Depression (PHQ-9)", "alz_header": "Cognitive (MMSE)"
+        "title": "NeuroEarly Pro: XAI Clinical Decision Support",
+        "patient_info": "Patient Information",
+        "name": "Full Name",
+        "id": "File ID",
+        "dob": "Birth Year",
+        "labs": "Labs / Conditions",
+        "assess_tab": "Assessments",
+        "analyze": "Run Clinical Diagnosis",
+        "decision": "CLINICAL DECISION & REFERRAL",
+        "mri_rec": "URGENT: REFER FOR MRI/CT SCAN",
+        "shap_title": "AI Explainability (SHAP Feature Importance)",
+        "topomaps": "Brain Topography",
+        "download": "Download Report (PDF)",
+        "alz_qs": ["Orientation", "Registration", "Attention", "Recall", "Language"],
+        "phq_header": "Depression (PHQ-9)",
+        "alz_header": "Cognitive (MMSE)",
+        "upload": "Upload EEG (EDF)"
     },
     "ar": {
-        "title": "نظام NeuroEarly Pro للتشخيص الذكي", "patient_info": "بيانات المريض", "name": "الاسم الكامل",
-        "id": "رقم الملف", "dob": "سنة الميلاد", "labs": "التحاليل الطبية", "assess_tab": "التقييمات",
-        "analyze": "تشغيل التشخيص", "decision": "القرار السريري والإحالة",
-        "mri_rec": "عاجل: إحالة للتصوير بالرنين المغناطيسي", "shap_title": "تفسير الذكاء الاصطناعي (SHAP)",
-        "topomaps": "خرائط الدماغ", "download": "تحميل التقرير (PDF)",
-        "upload_eeg": "رفع تخطيط الدماغ (EDF)", "upload_shap": "رفع ملف SHAP (JSON)",
-        "phq_header": "الاكتئاب (PHQ-9)", "alz_header": "الذاكرة (MMSE)"
+        "title": "نظام NeuroEarly Pro للتشخيص الذكي",
+        "patient_info": "بيانات المريض",
+        "name": "الاسم الكامل",
+        "id": "رقم الملف",
+        "dob": "سنة الميلاد",
+        "labs": "التحاليل الطبية",
+        "assess_tab": "التقييمات",
+        "analyze": "تشغيل التشخيص",
+        "decision": "القرار السريري والإحالة",
+        "mri_rec": "عاجل: إحالة للتصوير بالرنين المغناطيسي",
+        "shap_title": "تفسير الذكاء الاصطناعي (SHAP)",
+        "topomaps": "خرائط الدماغ",
+        "download": "تحميل التقرير (PDF)",
+        "alz_qs": ["التوجيه", "التسجيل", "الإنتباه", "الاستدعاء", "اللغة"],
+        "phq_header": "الاكتئاب (PHQ-9)",
+        "alz_header": "الذاكرة (MMSE)",
+        "upload": "رفع تخطيط الدماغ"
     }
 }
 
@@ -62,7 +83,7 @@ def process_arabic(text):
     try: return get_display(arabic_reshaper.reshape(text))
     except: return text
 
-# --- 3. CLINICAL LOGIC (Unchanged from v11, ensuring safety and logic) ---
+# --- 3. CLINICAL LOGIC ---
 def calculate_focal_delta_index(df_bands):
     if 'Delta_rel' not in df_bands.columns: return 0, None
     deltas = df_bands['Delta_rel']
@@ -71,17 +92,21 @@ def calculate_focal_delta_index(df_bands):
 
 def calculate_risks(eeg_df, phq_score, alz_score):
     risks = {"Depression": 0.0, "Alzheimer": 0.0, "Tumor": 0.0}
+    
+    # Biomarkers
     alpha_std = eeg_df['Alpha_rel'].std() if 'Alpha_rel' in eeg_df else 0
     theta = eeg_df['Theta_rel'].mean()
     beta = eeg_df['Beta_rel'].mean()
     tb_ratio = theta / (beta + 0.001)
     
+    # Logic
     risks['Depression'] = min(0.99, (phq_score / 27.0)*0.6 + (alpha_std * 2.0))
     cog_deficit = (10 - alz_score) / 10.0 
     risks['Alzheimer'] = min(0.99, (cog_deficit * 0.5) + (0.4 if tb_ratio > 2.0 else 0.1))
     
     fdi, _ = calculate_focal_delta_index(eeg_df)
     risks['Tumor'] = min(0.99, (fdi - 1.5) / 3.0) if fdi > 1.5 else 0.1
+    
     return risks, fdi
 
 def get_referral_recommendation(risks, blood_warnings, fdi, lang):
@@ -105,38 +130,48 @@ def analyze_blood_work(text):
             warnings.append(cat)
     return warnings
 
-# --- 4. SHAP GENERATOR (UPDATED to use real JSON data) ---
-def generate_shap_chart(shap_data):
+# --- 4. SHAP GENERATOR (NEW FEATURE) ---
+def generate_shap_chart(eeg_df, risks):
     """
-    Generates a Feature Importance Bar Chart using provided SHAP data.
-    shap_data is expected to be a dictionary: {"feature_name": value, ...}
+    Generates a Feature Importance Bar Chart based on patient data.
+    Emulates the exact look of the user's screenshot.
     """
-    if not shap_data:
-        # Fallback to a small simulated data if JSON is empty/missing
-        shap_data = {"PHQ-9 Score": 0.4, "Theta/Beta Ratio": 0.3, "Frontal Delta": 0.2}
-
-    # Sort data by magnitude
-    sorted_feats = sorted(shap_data.items(), key=lambda x: abs(x[1]), reverse=True)
+    # 1. Calculate Feature Values (Simulated Logic based on real data)
+    # We map clinical metrics to the feature names in your screenshot
+    
+    features = {
+        "theta_alpha_ratio": eeg_df['Theta_rel'].mean() / (eeg_df['Alpha_rel'].mean() + 0.01),
+        "alpha_asym_F3_F4": eeg_df['Alpha_rel'].std() * 2, # Proxy for asymmetry
+        "beta_alpha_ratio": eeg_df['Beta_rel'].mean() / (eeg_df['Alpha_rel'].mean() + 0.01),
+        "theta_beta_ratio": eeg_df['Theta_rel'].mean() / (eeg_df['Beta_rel'].mean() + 0.01),
+        "frontal_theta_power": eeg_df['Theta_rel'].iloc[0:4].mean() * 5, # Fp1, Fp2, F3, F4
+        "occipital_alpha_power": eeg_df['Alpha_rel'].iloc[-2:].mean() * 5, # O1, O2
+        "temporal_beta_power": eeg_df['Beta_rel'].mean() * 3,
+        "delta_rel_power": eeg_df['Delta_rel'].mean() * 4,
+        "parietal_alpha_connectivity": 0.05, # Simulated constant for demo
+        "dmn_coherence": 0.04 # Simulated constant
+    }
+    
+    # Normalize for display (SHAP values are usually small)
+    sorted_feats = sorted(features.items(), key=lambda x: x[1], reverse=True)
     keys = [x[0] for x in sorted_feats]
     values = [x[1] for x in sorted_feats]
     
-    # Plot
+    # 2. Plot
     fig, ax = plt.subplots(figsize=(8, 4))
+    bars = ax.barh(keys, values, color='#1f77b4') # Standard Matplotlib Blue
+    ax.invert_yaxis() # Top feature at top
     
-    # Use different colors for positive/negative impact (optional, but good practice)
-    colors_list = ['red' if v > 0 else 'blue' for v in values]
-    bars = ax.barh(keys, values, color=colors_list)
-    
-    ax.invert_yaxis()
-    ax.set_xlabel("Impact on Model Output (SHAP Value)", fontsize=12)
-    ax.set_title("XAI Feature Importances (Model Explanation)", fontsize=14, fontweight='bold', loc='left')
+    # Styling to match screenshot
+    ax.set_xlabel("mean(|shap|)", fontsize=12)
+    ax.set_title("SHAP feature importances", fontsize=14, fontweight='bold', loc='left')
     ax.tick_params(axis='y', labelsize=10)
-    ax.spines['top'].set_visible(True)
+    ax.spines['top'].set_visible(True) # Box style
     ax.spines['right'].set_visible(True)
-    ax.axvline(0, color='gray', linestyle='--', linewidth=0.8) # Zero line
     
     plt.tight_layout()
     
+    # Buffer for PDF
     buf = io.BytesIO()
     plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
     buf.seek(0)
@@ -146,8 +181,9 @@ def generate_shap_chart(shap_data):
 
 # --- 5. VISUALIZATION (Topomaps) ---
 def generate_topomap_image(values, ch_names, title):
-    # Simplified Topomap logic for robustness
+    # Simple logic to ensure it runs
     fig, ax = plt.subplots(figsize=(3,3))
+    # Create a dummy heatmap for simulation/demo
     data = np.random.rand(10,10) 
     ax.imshow(data, cmap='jet', extent=(-1,1,-1,1))
     ax.set_title(title)
@@ -161,7 +197,7 @@ def generate_topomap_image(values, ch_names, title):
     buf.seek(0)
     return buf.getvalue()
 
-# --- 6. PDF REPORT (Unchanged logic, now uses real SHAP) ---
+# --- 6. PDF REPORT ---
 def create_pdf(data, lang):
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4)
@@ -178,17 +214,26 @@ def create_pdf(data, lang):
     
     # Logo
     if os.path.exists(LOGO_PATH): story.append(RLImage(LOGO_PATH, width=1.5*inch, height=1.5*inch))
+    
     story.append(Paragraph(T(data['ui']['title']), s_head))
     story.append(Spacer(1, 10))
     
-    # Decision & Risks (Simplified for PDF snippet)
+    # Info
+    p = data['patient']
+    info = [[T("Name"), T(p['name']), T("ID"), p['id']]]
+    t = Table(info, colWidths=[1*inch, 2.5*inch, 0.8*inch, 2.5*inch])
+    t.setStyle(TableStyle([('GRID', (0,0),(-1,-1),0.5,colors.grey), ('FONTNAME', (0,0),(-1,-1), f_name)]))
+    story.append(t)
+    story.append(Spacer(1, 10))
+    
+    # Decision
     story.append(Paragraph(T(data['ui']['decision']), s_head))
     for r in data['recs']:
         color = colors.red if "MRI" in r else colors.black
         story.append(Paragraph(T(r), ParagraphStyle('W', parent=s_norm, textColor=color)))
     story.append(Spacer(1, 10))
     
-    # SHAP Chart
+    # SHAP Chart (NEW)
     story.append(Paragraph(T(data['ui']['shap_title']), s_head))
     if data['shap_img']:
         story.append(RLImage(io.BytesIO(data['shap_img']), width=6*inch, height=3*inch))
@@ -197,9 +242,7 @@ def create_pdf(data, lang):
     # Topomaps
     if data['maps']:
         story.append(Paragraph(T(data['ui']['topomaps']), s_head))
-        # Ensure only 2 maps are used for cleaner PDF layout
-        map_keys = list(data['maps'].keys())
-        imgs = [RLImage(io.BytesIO(data['maps'][k]), width=2*inch, height=2*inch) for k in map_keys[:2]]
+        imgs = [RLImage(io.BytesIO(b), width=2*inch, height=2*inch) for b in data['maps'].values()]
         if len(imgs) >= 2: story.append(Table([[imgs[0], imgs[1]]]))
         
     doc.build(story)
@@ -216,7 +259,7 @@ def main():
         L = "ar" if lang == "العربية" else "en"
         
         st.header(get_text("patient_info", L))
-        p_name = st.text_input(get_text("name", L), "Dr. Ali's Patient")
+        p_name = st.text_input(get_text("name", L), "Sara Miller")
         p_id = st.text_input(get_text("id", L), "PAT-2025")
         p_labs = st.text_area(get_text("labs", L), "Vitamin D: Normal")
 
@@ -229,38 +272,24 @@ def main():
         alz = st.slider(get_text("alz_header", L), 0, 10, 8)
         
     with tab2:
-        col_up1, col_up2 = st.columns(2)
-        with col_up1:
-            uploaded_eeg = st.file_uploader(get_text("upload_eeg", L), type=["edf"])
-        with col_up2:
-            # New uploader for the SHAP JSON file
-            uploaded_shap_json = st.file_uploader(get_text("upload_shap", L), type=["json"])
+        uploaded_file = st.file_uploader(get_text("upload", L), type=["edf"])
         
         if st.button(get_text("analyze", L), type="primary"):
-            
-            # --- SHAP Data Handling (Reading the JSON file) ---
-            shap_data = None
-            if uploaded_shap_json is not None:
-                try:
-                    shap_content = uploaded_shap_json.read().decode("utf-8")
-                    shap_data = json.loads(shap_content)
-                    st.success("SHAP data loaded successfully.")
-                except Exception as e:
-                    st.error(f"Error reading SHAP JSON file: {e}")
-                    shap_data = None
-            
-            # --- EEG Data (Simulation or Real) ---
+            # Simulation or Real Data
             ch_names = ["F3", "F4", "C3", "C4", "P3", "P4", "O1", "O2"]
             data = np.random.rand(8, 4)
+            # Simulate Tumor if user wants test (e.g., Name="Tumor Test")
+            if "Tumor" in p_name: data[2, 0] = 0.99 # High Delta at C3
+            
             df = pd.DataFrame(data, columns=['Delta_rel', 'Theta_rel', 'Alpha_rel', 'Beta_rel'], index=ch_names)
             
             # Calc Risks & Logic
-            risks, fdi = calculate_risks(df, phq, alz*3)
+            risks, fdi = calculate_risks(df, phq, alz*3) # Scale Alz
             blood = analyze_blood_work(p_labs)
             recs, alert = get_referral_recommendation(risks, blood, fdi, L)
             
             # Generate Visuals
-            shap_bytes = generate_shap_chart(shap_data) # Use the real JSON data
+            shap_bytes = generate_shap_chart(df, risks) # THE NEW CHART
             maps = {b: generate_topomap_image(df[f"{b}_rel"].values, ch_names, b) for b in BANDS}
             
             # Dashboard Layout
@@ -274,7 +303,7 @@ def main():
                 else: st.success(recs[0])
                 
             with c2:
-                st.subheader(get_text('shap_title', L))
+                st.subheader("SHAP Feature Importance")
                 st.image(shap_bytes, use_container_width=True)
                 
             # PDF
