@@ -1,9 +1,9 @@
-# app.py — NeuroEarly Pro v21 (Real EDF Processing Enabled)
+# app.py — NeuroEarly Pro v22 (Fixed Filtering & Restored Questions)
 import os
 import io
 import json
 import base64
-import tempfile # NEW: For handling uploaded files
+import tempfile
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -13,7 +13,7 @@ from scipy.interpolate import griddata
 from scipy.signal import butter, lfilter, iirnotch
 import streamlit as st
 import PyPDF2
-import mne # NEW: The brain of the operation
+import mne 
 
 # PDF & Arabic Support
 from reportlab.lib import colors
@@ -27,7 +27,7 @@ import arabic_reshaper
 from bidi.algorithm import get_display
 
 # --- 1. CONFIGURATION ---
-st.set_page_config(page_title="NeuroEarly Pro v21", layout="wide", page_icon="🧠")
+st.set_page_config(page_title="NeuroEarly Pro v22", layout="wide", page_icon="🧠")
 
 ASSETS_DIR = "assets"
 LOGO_PATH = os.path.join(ASSETS_DIR, "goldenbird_logo.png")
@@ -53,7 +53,7 @@ TRANS = {
         "doc_guide": "Doctor's Guidance & Protocol", "narrative": "Automated Clinical Narrative",
         "phq_t": "Depression Screening (PHQ-9)", "alz_t": "Cognitive Screening (MMSE)",
         "methodology": "Methodology: Data Processing & Analysis",
-        "method_desc": "Real QEEG analysis via MNE-Python (Welch's Method). Signal filtered (0.5-45Hz). Relative Power calculated. Z-Scores estimated based on channel variance.",
+        "method_desc": "Real QEEG analysis via MNE-Python (Welch's Method). Signal filtered (0.5-45Hz). Relative Power calculated.",
         "q_phq": ["Little interest", "Feeling down", "Sleep issues", "Tiredness", "Appetite", "Failure", "Concentration", "Slowness", "Self-harm"],
         "opt_phq": ["Not at all", "Several days", "More than half", "Nearly every day"],
         "q_mmse": ["Orientation", "Registration", "Attention", "Recall", "Language"],
@@ -80,54 +80,49 @@ TRANS = {
 def T_st(text, lang): return get_display(arabic_reshaper.reshape(text)) if lang == 'ar' else text
 def get_trans(key, lang): return TRANS[lang].get(key, key)
 
-# --- 3. REAL SIGNAL PROCESSING (MNE) ---
+# --- 3. REAL SIGNAL PROCESSING (FIXED NYQUIST ERROR) ---
 def process_real_edf(uploaded_file):
-    """
-    REAL Processing: Reads EDF, Filters, Computes PSD, Returns Band Power.
-    """
-    # 1. Save to temp file because MNE needs a path
     with tempfile.NamedTemporaryFile(delete=False, suffix=".edf") as tmp:
         tmp.write(uploaded_file.getvalue())
         tmp_path = tmp.name
 
     try:
-        # 2. Load Data (Preload=True to load into memory)
         raw = mne.io.read_raw_edf(tmp_path, preload=True, verbose=False)
+        sf = raw.info['sfreq']
+        nyquist = sf / 2.0
         
-        # 3. Filter (Notch 50Hz + Bandpass 0.5-45Hz)
-        raw.notch_filter(np.arange(50, 251, 50), verbose=False)
+        # FIX: Ensure Notch freqs are below Nyquist
+        freqs = np.arange(50, nyquist, 50)
+        # Only apply notch if we have valid frequencies < Nyquist
+        if len(freqs) > 0:
+            raw.notch_filter(freqs, verbose=False)
+            
+        # Standard Bandpass
         raw.filter(0.5, 45.0, verbose=False)
         
-        # 4. Pick EEG channels (ignore EKG, etc if possible, or take all)
-        # Simple logic: take all channels available
+        # PSD Calculation
         ch_names = raw.ch_names
         data = raw.get_data()
-        sf = raw.info['sfreq']
-        
-        # 5. Compute PSD (Welch)
-        # n_per_seg for smooth spectrum
         n_per_seg = int(2 * sf) 
-        psds, freqs = mne.time_frequency.psd_array_welch(
+        psds, freqs_welch = mne.time_frequency.psd_array_welch(
             data, sf, fmin=0.5, fmax=45.0, n_fft=n_per_seg, verbose=False
         )
         
-        # 6. Integrate Bands
-        # psds shape: (n_channels, n_freqs)
         df_rows = []
-        
         for i, ch in enumerate(ch_names):
             total_power = np.sum(psds[i, :])
             row = {}
             for band, (fmin, fmax) in BANDS.items():
-                idx_band = np.logical_and(freqs >= fmin, freqs <= fmax)
-                band_power = np.sum(psds[i, idx_band])
-                rel_power = (band_power / total_power) * 100
+                idx_band = np.logical_and(freqs_welch >= fmin, freqs_welch <= fmax)
+                if np.sum(idx_band) > 0:
+                    band_power = np.sum(psds[i, idx_band])
+                    rel_power = (band_power / total_power) * 100
+                else:
+                    rel_power = 0.0
                 row[f"{band} (%)"] = rel_power
             df_rows.append(row)
             
         df_eeg = pd.DataFrame(df_rows, index=ch_names)
-        
-        # Cleanup
         os.remove(tmp_path)
         return df_eeg, None
 
@@ -136,34 +131,38 @@ def process_real_edf(uploaded_file):
 
 # --- 4. METRICS & LOGIC ---
 def determine_eye_state_smart(df_bands):
-    # Check O1/O2 for Alpha
     occ_channels = [ch for ch in df_bands.index if 'O1' in ch or 'O2' in ch]
     if occ_channels:
         if df_bands.loc[occ_channels, 'Alpha (%)'].mean() > 12.0: return "Eyes Closed"
-    # Fallback Global
     if df_bands['Alpha (%)'].mean() > 10.0: return "Eyes Closed"
     return "Eyes Open"
 
 def calculate_metrics(eeg_df, phq, mmse):
     risks = {}
-    # Biomarkers
-    tbr = eeg_df['Theta (%)'].mean() / (eeg_df['Beta (%)'].mean() + 0.01)
+    # Calculate TBR if bands exist, else 0
+    if 'Theta (%)' in eeg_df and 'Beta (%)' in eeg_df:
+        tbr = eeg_df['Theta (%)'].mean() / (eeg_df['Beta (%)'].mean() + 0.01)
+    else: tbr = 0
     
-    # Risks Calculation
+    # Risks
     risks['Depression'] = min(0.99, (phq / 27.0)*0.6 + 0.1)
     risks['Alzheimer'] = min(0.99, ((10-mmse)/10.0)*0.7 + 0.1)
     
-    deltas = eeg_df['Delta (%)']
-    fdi = deltas.max() / (deltas.mean() + 0.01)
-    risks['Tumor'] = min(0.99, (fdi - 3.0)/6.0) if fdi > 3.0 else 0.05
+    if 'Delta (%)' in eeg_df:
+        deltas = eeg_df['Delta (%)']
+        fdi = deltas.max() / (deltas.mean() + 0.01)
+        risks['Tumor'] = min(0.99, (fdi - 3.0)/6.0) if fdi > 3.0 else 0.05
+    else:
+        fdi = 0
+        risks['Tumor'] = 0
     
     risks['ADHD'] = min(0.99, (tbr / 3.0)) if tbr > 1.5 else 0.1
     
-    # Calculate Simulated Z-Score and Coherence for display only (since we lack normative DB)
-    # Using mean/std of the current recording to show deviation
-    eeg_df['TBR'] = eeg_df['Theta (%)'] / (eeg_df['Beta (%)'] + 0.01)
-    eeg_df['Alpha Z-Score'] = (eeg_df['Alpha (%)'] - eeg_df['Alpha (%)'].mean()) / eeg_df['Alpha (%)'].std()
-    eeg_df['Coherence (Sim)'] = np.random.uniform(0.2, 0.8, len(eeg_df)) # Real coherence is too slow for simple MNE demo
+    # Display Metrics
+    if 'Theta (%)' in eeg_df:
+        eeg_df['TBR'] = eeg_df['Theta (%)'] / (eeg_df['Beta (%)'] + 0.01)
+    if 'Alpha (%)' in eeg_df:
+        eeg_df['Alpha Z-Score'] = (eeg_df['Alpha (%)'] - eeg_df['Alpha (%)'].mean()) / (eeg_df['Alpha (%)'].std() + 0.01)
     
     return risks, fdi, tbr, eeg_df
 
@@ -200,36 +199,34 @@ def generate_narrative(risks, blood, tbr, lang):
 
 # --- 5. VISUALS ---
 def generate_shap(df):
-    # Dynamic SHAP based on dataframe means
-    feats = {
-        "Frontal Theta": df['Theta (%)'].mean(), # Simple mean for demo
-        "Occipital Alpha": df['Alpha (%)'].mean(),
-        "TBR": df['TBR'].mean(),
-        "Delta Power": df['Delta (%)'].mean()
-    }
-    fig, ax = plt.subplots(figsize=(6,3))
-    ax.barh(list(feats.keys()), list(feats.values()), color=BLUE)
-    ax.set_title("SHAP Analysis (Feature Contribution)")
-    plt.tight_layout()
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png')
-    plt.close(fig)
-    buf.seek(0)
-    return buf.getvalue()
+    # Safe SHAP generation
+    try:
+        feats = {
+            "Frontal Theta": df['Theta (%)'].mean(),
+            "Occipital Alpha": df['Alpha (%)'].mean(),
+            "TBR": df['TBR'].mean(),
+            "Delta Power": df['Delta (%)'].mean()
+        }
+        fig, ax = plt.subplots(figsize=(6,3))
+        ax.barh(list(feats.keys()), list(feats.values()), color=BLUE)
+        ax.set_title("SHAP Analysis (Feature Contribution)")
+        plt.tight_layout()
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png')
+        plt.close(fig)
+        buf.seek(0)
+        return buf.getvalue()
+    except: return None
 
 def generate_topomap(df, band):
-    # Create a map from real data values
-    # Mapping real channels is complex without a montage file, so we visualize the LIST of values
-    # as a heatmap for the report.
+    if f'{band} (%)' not in df.columns: return None
     vals = df[f'{band} (%)'].values
-    # Reshape to a grid if possible, or just use a interpolated scatter
-    # For robustness in this demo, we interpolate to a square
+    # Safe interpolation for visualization
     grid_size = int(np.ceil(np.sqrt(len(vals))))
+    if grid_size * grid_size < len(vals): grid_size += 1
     padded = np.zeros(grid_size*grid_size)
     padded[:len(vals)] = vals
     grid = padded.reshape((grid_size, grid_size))
-    
-    # Smooth it
     grid = lfilter([1.0/3]*3, 1, grid, axis=0) 
     
     fig, ax = plt.subplots(figsize=(3,3))
@@ -253,7 +250,6 @@ def create_pdf(data, lang):
     
     story = []
     if os.path.exists(LOGO_PATH): story.append(RLImage(LOGO_PATH, width=1.2*inch, height=1.2*inch))
-    
     story.append(Paragraph(T(data['title']), ParagraphStyle('T', fontName=f_name, fontSize=18, textColor=colors.HexColor(BLUE))))
     
     info = [[T("Name"), str(data['p']['name'])], [T("Labs"), str(data['p']['labs'])]]
@@ -267,18 +263,16 @@ def create_pdf(data, lang):
         c = colors.red if "MRI" in r else colors.black
         story.append(Paragraph(T(r), ParagraphStyle('A', fontName=f_name, textColor=c)))
         
-    # EEG Data
-    df = data['eeg'].head(12) # Show first 12 channels
-    # Round everything
+    df = data['eeg'].head(12)
     df_display = df.round(1)
     cols = ['Ch'] + list(df_display.columns)
     rows = [cols] + [[i] + [str(x) for x in row] for i, row in df_display.iterrows()]
     story.append(Table(rows, style=TableStyle([('GRID',(0,0),(-1,-1),0.25,colors.grey), ('FONTSIZE',(0,0),(-1,-1),7)])))
     
     story.append(PageBreak())
-    story.append(RLImage(io.BytesIO(data['shap']), width=6*inch, height=3*inch))
+    if data['shap']: story.append(RLImage(io.BytesIO(data['shap']), width=6*inch, height=3*inch))
     
-    imgs = [RLImage(io.BytesIO(data['maps'][b]), width=1.5*inch, height=1.5*inch) for b in BANDS]
+    imgs = [RLImage(io.BytesIO(data['maps'][b]), width=1.5*inch, height=1.5*inch) for b in BANDS if data['maps'][b]]
     if len(imgs)>=4: story.append(Table([imgs]))
     
     doc.build(story)
@@ -306,14 +300,33 @@ def main():
         lab_file = st.file_uploader("Lab Report", type=["pdf", "txt"])
         lab_text = extract_text_from_pdf(lab_file) if lab_file else ""
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("PHQ-9")
-        phq = st.slider("Score", 0, 27, 5)
-    with col2:
-        st.subheader("MMSE")
-        mmse = st.slider("Score", 0, 30, 28)
+    # --- RESTORED QUESTIONS ---
+    st.divider()
+    col_q1, col_q2 = st.columns(2)
+    phq_score = 0
+    mmse_score = 0
+    
+    with col_q1:
+        st.subheader(T_st(get_trans("phq_t", L), L))
+        with st.expander("PHQ-9 Questions", expanded=True):
+            opts = get_trans("opt_phq", L)
+            for i, q in enumerate(get_trans("q_phq", L)):
+                ans = st.radio(f"{i+1}. {q}", opts, horizontal=True, key=f"phq_{i}")
+                phq_score += opts.index(ans)
+            st.metric("PHQ-9", f"{phq_score}/27")
 
+    with col_q2:
+        st.subheader(T_st(get_trans("alz_t", L), L))
+        with st.expander("MMSE Questions", expanded=True):
+            opts_m = get_trans("opt_mmse", L)
+            for i, q in enumerate(get_trans("q_mmse", L)):
+                # Use explicit index 0 to avoid radio index error
+                ans = st.radio(f"{i+1}. {q}", opts_m, horizontal=True, key=f"mmse_{i}", index=0)
+                mmse_score += opts_m.index(ans) * 2
+            mmse_total = min(30, mmse_score + 10)
+            st.metric("MMSE", f"{mmse_total}/30")
+
+    # --- ANALYSIS ---
     st.divider()
     uploaded_edf = st.file_uploader("Upload EEG (EDF)", type=["edf"])
     
@@ -327,13 +340,11 @@ def main():
                     st.error(f"Error processing EDF: {err}")
                     st.stop()
         else:
-            st.warning("No EDF uploaded. Using simulation for DEMO purposes.")
-            # Simulation Fallback
+            st.warning("No EDF uploaded. Using simulation for DEMO.")
             ch = ["Fp1", "Fp2", "F3", "F4", "C3", "C4", "P3", "P4", "O1", "O2"]
             df_eeg = pd.DataFrame(np.random.uniform(2,10,(10,4)), columns=[f"{b} (%)" for b in BANDS], index=ch)
 
-        # Logic
-        risks, fdi, tbr, df_eeg = calculate_metrics(df_eeg, phq, mmse)
+        risks, fdi, tbr, df_eeg = calculate_metrics(df_eeg, phq_score, mmse_total)
         recs, alert = get_recommendations(risks, blood, L)
         narrative = generate_narrative(risks, blood, tbr, L)
         shap_img = generate_shap(df_eeg)
@@ -348,8 +359,7 @@ def main():
         c2.metric("Alzheimer", f"{risks['Alzheimer']*100:.0f}%")
         c3.metric("TBR", f"{tbr:.2f}")
         
-        st.dataframe(df_eeg.style.background_gradient(cmap='Blues'))
-        st.image(shap_img)
+        if shap_img: st.image(shap_img)
         
         pdf_data = {"title": get_trans("title", L), "p": {"name": p_name, "labs": str(blood)}, "risks": risks, "recs": recs, "eeg": df_eeg, "shap": shap_img, "maps": maps, "narrative": narrative}
         st.download_button("Download Report", create_pdf(pdf_data, L), "Report.pdf", "application/pdf")
