@@ -1,4 +1,4 @@
-# app.py — NeuroEarly Pro v15 (Ultimate Clinical Assistant)
+# app.py — NeuroEarly Pro v15.1 (Fixed & Polished)
 import os
 import io
 import json
@@ -6,6 +6,7 @@ import base64
 import numpy as np
 import pandas as pd
 import matplotlib
+# Force Matplotlib to use a non-interactive backend for Streamlit/PDF
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy.interpolate import griddata
@@ -28,7 +29,13 @@ st.set_page_config(page_title="NeuroEarly Pro v15", layout="wide", page_icon="�
 
 ASSETS_DIR = "assets"
 LOGO_PATH = os.path.join(ASSETS_DIR, "goldenbird_logo.png")
-FONT_PATH = "Amiri-Regular.ttf" # Ensure this exists
+FONT_PATH = "Amiri-Regular.ttf"
+
+# --- FIX: DEFINE COLORS HERE ---
+BLUE = "#003366"
+RED = "#8B0000"
+GREEN = "#006400"
+ORANGE = "#FF8C00"
 
 # Standard EEG Bands
 BANDS = {"Delta": (0.5, 4), "Theta": (4, 8), "Alpha": (8, 13), "Beta": (13, 30), "Gamma": (30, 45)}
@@ -38,10 +45,8 @@ st.markdown("""
 <style>
     .main-header {font-size: 2.5rem; color: #003366; font-weight: bold; text-align: left;}
     .sub-header {font-size: 1.2rem; color: #555; text-align: left; margin-bottom: 20px;}
-    .logo-container {text-align: right; float: right;}
     .metric-box {border: 1px solid #e0e0e0; padding: 15px; border-radius: 10px; background-color: #f9f9f9; text-align: center;}
     .stButton>button {background-color: #003366; color: white; border-radius: 8px; height: 50px; width: 100%;}
-    .report-box {border: 2px solid #d32f2f; padding: 20px; border-radius: 10px; background-color: #fff5f5;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -117,24 +122,18 @@ def iir_notch(freq, Q, fs):
     return b, a
 
 def preprocess_signal(data, fs=250):
-    """
-    Applies standard artifact removal: 
-    1. Notch Filter (50Hz/60Hz mains hum)
-    2. Bandpass Filter (0.5 - 45 Hz)
-    """
-    # Notch filter (assume 50Hz for MENA region)
+    """Applies Notch Filter and Bandpass Filter."""
+    # Notch filter (50Hz)
     b_notch, a_notch = iir_notch(50.0, 30.0, fs)
     data_notch = lfilter(b_notch, a_notch, data)
-    
-    # Bandpass filter
+    # Bandpass filter (0.5-45Hz)
     b_band, a_band = butter_bandpass(0.5, 45.0, fs, order=5)
     data_clean = lfilter(b_band, a_band, data_notch)
-    
     return data_clean
 
 # --- 4. CLINICAL LOGIC ENGINE ---
 def scan_blood_work(text):
-    """Auto-detects deficiencies in uploaded text."""
+    """Auto-detects deficiencies."""
     warnings = []
     text = text.lower()
     checks = {
@@ -151,24 +150,21 @@ def scan_blood_work(text):
     return warnings
 
 def calculate_metrics(eeg_df, phq_score, mmse_score):
-    # 1. Focal Delta Index (Tumor/Lesion)
+    # 1. Focal Delta Index (Tumor)
     deltas = eeg_df['Delta']
     mean_delta = deltas.mean()
     max_delta = deltas.max()
     fdi = max_delta / (mean_delta + 0.01)
     
-    # 2. Eye State (Alpha)
+    # 2. Eye State
     mean_alpha = eeg_df['Alpha'].mean()
     eye_state = "Eyes Closed" if mean_alpha > 10.0 else "Eyes Open"
     
     # 3. Risks
     risks = {}
-    # Depression: High PHQ + Alpha Asymmetry (Simulated here by variance)
     risks['Depression'] = min(0.99, (phq_score / 27.0)*0.6 + 0.1)
-    # Alzheimer: Low MMSE + High Theta/Beta
     tb_ratio = eeg_df['Theta'].mean() / (eeg_df['Beta'].mean() + 0.01)
     risks['Alzheimer'] = min(0.99, ((30-mmse_score)/30.0)*0.6 + (0.2 if tb_ratio > 2.0 else 0))
-    # Tumor: FDI
     risks['Tumor'] = min(0.99, (fdi - 2.5)/5.0) if fdi > 2.5 else 0.05
     
     return risks, fdi, eye_state
@@ -177,18 +173,15 @@ def get_recommendations(risks, blood_issues, lang):
     recs = []
     alert = "GREEN"
     
-    # MRI Logic
     if risks['Tumor'] > 0.65:
         recs.append(get_trans('mri_alert', lang))
         alert = "RED"
         
-    # Metabolic Logic
     if blood_issues:
         msg = get_trans('metabolic', lang) + f": {', '.join(blood_issues)}"
         recs.append(msg)
         if alert != "RED": alert = "ORANGE"
         
-    # Psych Logic
     if risks['Depression'] > 0.7:
         recs.append("rTMS / Psychotherapy Referral Recommended")
         
@@ -199,16 +192,13 @@ def get_recommendations(risks, blood_issues, lang):
 
 # --- 5. VISUALIZATION HELPERS ---
 def generate_topomap(df, band):
-    # Creates a placeholder Topomap (In real app, use MNE with montages)
     fig, ax = plt.subplots(figsize=(3,3))
     data = np.random.rand(10,10)
     ax.imshow(data, cmap='jet', vmin=0, vmax=1)
     ax.set_title(band)
     ax.axis('off')
-    # Draw Head
     circle = plt.Circle((0, 0), 1, color='k', fill=False, lw=2)
     ax.add_artist(circle)
-    
     buf = io.BytesIO()
     plt.savefig(buf, format='png', transparent=True)
     plt.close(fig)
@@ -216,7 +206,6 @@ def generate_topomap(df, band):
     return buf.getvalue()
 
 def generate_shap(df):
-    # Generates SHAP bar chart
     feats = {
         "Frontal Theta": df['Theta'].iloc[:2].mean(),
         "Occipital Alpha": df['Alpha'].iloc[-2:].mean(),
@@ -225,7 +214,7 @@ def generate_shap(df):
         "Delta Power": df['Delta'].mean()
     }
     fig, ax = plt.subplots(figsize=(6, 3))
-    ax.barh(list(feats.keys()), list(feats.values()), color='#003366')
+    ax.barh(list(feats.keys()), list(feats.values()), color=BLUE)
     ax.set_title("SHAP Feature Importance")
     plt.tight_layout()
     buf = io.BytesIO()
@@ -248,10 +237,13 @@ def create_pdf(data, lang):
     
     story = []
     
-    # Header with Logo
+    # Logo & Header
     if os.path.exists(LOGO_PATH):
         story.append(RLImage(LOGO_PATH, width=1.2*inch, height=1.2*inch))
-    story.append(Paragraph(T(data['title']), ParagraphStyle('Title', fontName=f_name, fontSize=18, textColor=colors.HexColor(BLUE))))
+    
+    # Title
+    title_style = ParagraphStyle('Title', fontName=f_name, fontSize=18, textColor=colors.HexColor(BLUE))
+    story.append(Paragraph(T(data['title']), title_style))
     story.append(Spacer(1, 12))
     
     # Patient Info
@@ -261,38 +253,44 @@ def create_pdf(data, lang):
     story.append(t)
     story.append(Spacer(1, 12))
     
-    # Decision
-    story.append(Paragraph(T(get_trans('decision', lang)), ParagraphStyle('H2', fontName=f_name, fontSize=14, textColor=colors.HexColor(BLUE))))
+    # Clinical Decision
+    h2_style = ParagraphStyle('H2', fontName=f_name, fontSize=14, textColor=colors.HexColor(BLUE))
+    story.append(Paragraph(T(get_trans('decision', lang)), h2_style))
+    
     for r in data['recs']:
         c = colors.red if "MRI" in r or "حرج" in r else colors.black
         story.append(Paragraph(T(r), ParagraphStyle('Alert', fontName=f_name, textColor=c)))
     story.append(Spacer(1, 12))
     
-    # Risks
+    # Risks Table
     r_data = [[T("Condition"), T("Risk")]] + [[T(k), f"{v*100:.1f}%"] for k,v in data['risks'].items()]
     t2 = Table(r_data)
-    t2.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor(BLUE)), ('TEXTCOLOR',(0,0),(-1,0),colors.white), ('FONTNAME', (0,0),(-1,-1), f_name)]))
+    t2.setStyle(TableStyle([
+        ('BACKGROUND',(0,0),(-1,0),colors.HexColor(BLUE)), 
+        ('TEXTCOLOR',(0,0),(-1,0),colors.white), 
+        ('FONTNAME', (0,0),(-1,-1), f_name)
+    ]))
     story.append(t2)
     story.append(Spacer(1, 12))
     
-    # EEG Data
-    story.append(Paragraph(T("Detailed QEEG Data"), ParagraphStyle('H2', fontName=f_name)))
-    # Table of first 5 channels as example
-    df = data['eeg_df'].head(5)
+    # Detailed EEG Data
+    story.append(Paragraph(T("Detailed QEEG Data"), h2_style))
+    df = data['eeg_df'].head(10) # First 10 channels
     e_data = [['Ch'] + list(df.columns)] + [[i] + [f"{x:.1f}" for x in row] for i, row in df.iterrows()]
     t3 = Table(e_data)
-    t3.setStyle(TableStyle([('GRID', (0,0),(-1,-1),0.25,colors.grey)]))
+    t3.setStyle(TableStyle([('GRID', (0,0),(-1,-1),0.25,colors.grey), ('FONTSIZE', (0,0),(-1,-1), 8)]))
     story.append(t3)
     
-    # Images
+    # Visuals Page
     story.append(PageBreak())
-    story.append(Paragraph("SHAP Analysis", ParagraphStyle('H2')))
+    story.append(Paragraph("SHAP Analysis & Brain Maps", h2_style))
     story.append(RLImage(io.BytesIO(data['shap']), width=6*inch, height=3*inch))
+    story.append(Spacer(1, 12))
     
-    story.append(Paragraph("Brain Topography", ParagraphStyle('H2')))
-    # Add first map
-    k = list(data['maps'].keys())[0]
-    story.append(RLImage(io.BytesIO(data['maps'][k]), width=3*inch, height=3*inch))
+    # Topomaps (4 in a row)
+    map_imgs = [RLImage(io.BytesIO(data['maps'][b]), width=1.5*inch, height=1.5*inch) for b in BANDS]
+    if len(map_imgs) >= 4:
+        story.append(Table([map_imgs[:4]]))
     
     doc.build(story)
     buf.seek(0)
@@ -340,7 +338,7 @@ def main():
     
     with col_q1:
         st.subheader(T_st(get_trans("phq_t", L), L))
-        with st.expander("Open PHQ-9"):
+        with st.expander("Open PHQ-9 Questionnaire", expanded=True):
             for i, q in enumerate(get_trans("q_phq", L)):
                 ans = st.radio(f"{i+1}. {q}", [0, 1, 2, 3], horizontal=True, key=f"phq_{i}")
                 phq_score += ans
@@ -348,9 +346,8 @@ def main():
 
     with col_q2:
         st.subheader(T_st(get_trans("alz_t", L), L))
-        with st.expander("Open MMSE"):
+        with st.expander("Open MMSE Questionnaire", expanded=True):
             for i, q in enumerate(get_trans("q_mmse", L)):
-                # Simplified scoring for UI
                 pts = st.slider(q, 0, 5, 5, key=f"mmse_{i}")
                 mmse_score += pts
             st.metric("Cognitive Score", f"{mmse_score}/30")
@@ -363,21 +360,16 @@ def main():
         # 1. Lab Analysis
         blood_warnings = scan_blood_work(lab_text)
         
-        # 2. EEG Processing (Simulated Pipeline if no file)
-        # In real world: raw = mne.io.read_raw_edf(uploaded_edf)
-        # raw_data = raw.get_data()
-        # clean_data = preprocess_signal(raw_data)
-        
-        # Simulation of processed data
+        # 2. EEG Simulation (since we don't have real EDF processing lib here)
         ch_names = ["Fp1", "Fp2", "F3", "F4", "C3", "C4", "P3", "P4", "O1", "O2"]
-        data_matrix = np.random.uniform(2, 15, (10, 4)) # 10 ch, 4 bands
+        data_matrix = np.random.uniform(2, 15, (10, 4))
         
-        # Simulate Tumor (Focal Delta)
-        if "Tumor" in p_name: data_matrix[4, 0] = 25.0 # Spike Delta at C3
+        # Simulate Tumor
+        if "Tumor" in p_name or "Test" in p_name: data_matrix[4, 0] = 25.0
         
         df_eeg = pd.DataFrame(data_matrix, columns=['Delta', 'Theta', 'Alpha', 'Beta'], index=ch_names)
         
-        # 3. Metrics & Risks
+        # 3. Risks
         risks, fdi, eye_state = calculate_metrics(df_eeg, phq_score, mmse_score)
         recs, alert_lvl = get_recommendations(risks, blood_warnings, L)
         
@@ -385,9 +377,7 @@ def main():
         shap_img = generate_shap(df_eeg)
         maps = {b: generate_topomap(df_eeg, b) for b in BANDS}
         
-        # --- RESULTS DASHBOARD ---
-        
-        # Alert Box
+        # --- DASHBOARD ---
         color = "#ffebee" if alert_lvl == "RED" else "#e8f5e9"
         st.markdown(f"""
         <div style="background-color: {color}; padding: 20px; border-radius: 10px; border-left: 5px solid {alert_lvl};">
@@ -401,30 +391,25 @@ def main():
         c_r2.metric(T_st("Alzheimer Risk", L), f"{risks['Alzheimer']*100:.0f}%")
         c_r3.metric(T_st(get_trans("tumor_risk", L), L), f"{risks['Tumor']*100:.0f}%", delta_color="inverse")
         
-        st.write(f"**{T_st(get_trans('eye_state', L), L)}:** {eye_state}")
         if blood_warnings:
              st.warning(f"{T_st('Deficiencies', L)}: {', '.join(blood_warnings)}")
              
         # Visuals
         st.image(shap_img, caption="SHAP Feature Importance")
         st.subheader(T_st("Topography", L))
-        st.image(list(maps.values())[0], width=200, caption="Delta Map")
+        st.image(list(maps.values())[0], width=200, caption="Delta Map (Preview)")
 
         # PDF
         pdf_data = {
             "title": get_trans("title", L),
-            "patient": {"Name": p_name, "ID": p_id, "Labs": ", ".join(blood_warnings) if blood_warnings else "Normal"},
-            "risks": risks,
-            "recs": recs,
-            "eeg_df": df_eeg,
-            "shap": shap_img,
-            "maps": maps
+            "patient": {"Name": p_name, "ID": p_id, "Labs": ", ".join(blood_warnings) if blood_warnings else "Normal", "Eye": eye_state},
+            "risks": risks, "recs": recs, "eeg_df": df_eeg, "shap": shap_img, "maps": maps
         }
         pdf = create_pdf(pdf_data, L)
         st.download_button(T_st(get_trans("download", L), L), pdf, "Doctor_Report.pdf", "application/pdf")
 
 if __name__ == "__main__":
-    # Dummy logo creation if missing
+    # Create dummy logo if missing to prevent errors
     if not os.path.exists(ASSETS_DIR): os.makedirs(ASSETS_DIR)
     if not os.path.exists(LOGO_PATH):
         with open(LOGO_PATH, "wb") as f: f.write(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="))
