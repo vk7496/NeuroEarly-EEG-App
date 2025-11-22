@@ -28,4 +28,4 @@ packaging==25.0
 fonttools==4.60.1
 tenacity==9.1.2
 watchdog==6.0.0
-
+PyPDF2
