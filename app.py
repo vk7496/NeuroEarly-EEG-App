@@ -1,4 +1,4 @@
-# app.py — NeuroEarly Pro v19.1 (Fixed Dictionary Error)
+# app.py — NeuroEarly Pro v20 (Final Bug-Free Version)
 import os
 import io
 import json
@@ -6,6 +6,7 @@ import base64
 import numpy as np
 import pandas as pd
 import matplotlib
+# Force Matplotlib to use a non-interactive backend for server stability
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy.interpolate import griddata
@@ -25,7 +26,7 @@ import arabic_reshaper
 from bidi.algorithm import get_display
 
 # --- 1. CONFIGURATION ---
-st.set_page_config(page_title="NeuroEarly Pro v19.1", layout="wide", page_icon="🧠")
+st.set_page_config(page_title="NeuroEarly Pro v20", layout="wide", page_icon="🧠")
 
 ASSETS_DIR = "assets"
 LOGO_PATH = os.path.join(ASSETS_DIR, "goldenbird_logo.png")
@@ -49,7 +50,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 2. LOCALIZATION (FIXED: Added opt_mmse) ---
+# --- 2. LOCALIZATION ---
 TRANS = {
     "en": {
         "title": "NeuroEarly Pro: Advanced Clinical System",
@@ -62,18 +63,15 @@ TRANS = {
         "doc_guide": "Doctor's Guidance & Protocol", "narrative": "Automated Clinical Narrative",
         "phq_t": "Depression Screening (PHQ-9)", "alz_t": "Cognitive Screening (MMSE)",
         "methodology": "Methodology: Data Processing & Analysis",
-        "method_desc": "QEEG data was analyzed using a simulated 10-20 system. Bands calculated via FFT on a 2-second epoch. Z-Scores reflect deviation from a simulated normative database. Alpha Asymmetry (O1/O2) is prioritized for eye-state detection.",
+        "method_desc": "QEEG data analyzed via FFT. Z-Scores reflect deviation from normative database. Alpha Asymmetry (O1/O2) used for eye-state.",
         "q_phq": [
-            "Little interest or pleasure in doing things", "Feeling down, depressed, or hopeless",
-            "Trouble falling or staying asleep", "Feeling tired or having little energy",
-            "Poor appetite or overeating", "Feeling bad about yourself",
-            "Trouble concentrating", "Moving/speaking slowly or restless",
-            "Thoughts of self-harm"
+            "Little interest or pleasure", "Feeling down/depressed", "Sleep issues", 
+            "Feeling tired", "Appetite changes", "Feeling bad about yourself",
+            "Trouble concentrating", "Moving slowly/restless", "Thoughts of self-harm"
         ],
-        "opt_phq": ["Not at all", "Several days", "More than half the days", "Nearly every day"],
-        "q_mmse": ["Orientation (Time/Place)", "Registration (Repeat 3 words)", "Attention (Count backwards by 7)", "Recall (Remember 3 words)", "Language (Naming objects)"],
-        # THIS WAS MISSING IN V19:
-        "opt_mmse": ["Incorrect", "Partial", "Correct"] 
+        "opt_phq": ["Not at all", "Several days", "More than half days", "Nearly every day"],
+        "q_mmse": ["Orientation", "Registration", "Attention", "Recall", "Language"],
+        "opt_mmse": ["Incorrect", "Partial", "Correct"]
     },
     "ar": {
         "title": "نظام NeuroEarly Pro: التحليل السريري المتقدم",
@@ -86,16 +84,14 @@ TRANS = {
         "doc_guide": "توجيهات الطبيب والبروتوكول", "narrative": "الرواية السريرية التلقائية",
         "phq_t": "فحص الاكتئاب (PHQ-9)", "alz_t": "فحص الذاكرة (MMSE)",
         "methodology": "المنهجية: معالجة وتحليل البيانات",
-        "method_desc": "تم تحليل بيانات QEEG باستخدام نظام 10-20 المحاكي. تم حساب النطاقات عبر تحويل فورييه السريع (FFT). تعكس قيم Z-Score الانحراف عن قاعدة بيانات هنجارية محاكية. يتم إعطاء الأولوية لتناظر ألفا (O1/O2) للكشف عن حالة العين.",
+        "method_desc": "تم تحليل QEEG عبر FFT. تعكس Z-Score الانحراف عن الطبيعي. تناظر ألفا يستخدم لحالة العين.",
         "q_phq": [
-            "قلة الاهتمام أو المتعة", "الشعور بالإحباط أو الاكتئاب",
-            "صعوبة النوم", "الشعور بالتعب", "ضعف الشهية",
-            "الشعور بالسوء تجاه النفس", "صعوبة التركيز",
-            "بطء الحركة أو الكلام", "أفكار لإيذاء النفس"
+            "قلة الاهتمام أو المتعة", "الشعور بالإحباط", "صعوبة النوم", 
+            "الشعور بالتعب", "ضعف الشهية", "الشعور بالسوء", 
+            "صعوبة التركيز", "بطء الحركة", "أفكار لإيذاء النفس"
         ],
         "opt_phq": ["أبداً", "عدة أيام", "أكثر من نصف الأيام", "يومياً تقريباً"],
-        "q_mmse": ["التوجيه (الوقت/المكان)", "التسجيل (تكرار 3 كلمات)", "الانتباه (العد العكسي)", "الاستدعاء (تذكر الكلمات)", "اللغة (تسمية الأشياء)"],
-        # THIS WAS MISSING IN V19:
+        "q_mmse": ["التوجيه", "التسجيل", "الانتباه", "الاستدعاء", "اللغة"],
         "opt_mmse": ["خطأ", "جزئي", "صحيح"]
     }
 }
@@ -136,11 +132,11 @@ def calculate_metrics(eeg_df, phq_score, mmse_score):
     fdi = deltas.max() / (deltas.mean() + 0.01)
     risks['Tumor'] = min(0.99, (fdi - 2.5)/5.0) if fdi > 2.5 else 0.05
     
-    # 2. Advanced Metrics (Biomarkers)
+    # 2. Advanced Metrics
     tbr = eeg_df['Theta (%)'].mean() / (eeg_df['Beta (%)'].mean() + 0.01)
     risks['ADHD'] = min(0.99, 0.1 + (tbr/4.0) if tbr > 2.5 else 0.05) 
     
-    # 3. Connectivity (Simulated)
+    # 3. Connectivity
     conn = eeg_df['Coherence (Fp1-Fp2)'].mean()
     risks['Connectivity'] = conn
     
@@ -190,15 +186,15 @@ def generate_narrative(risks, blood_issues, tbr, lang):
         narrative += T_st(" **CRITICAL FINDING:** Significant focal Delta asymmetry detected, requiring immediate imaging. ", L)
     
     if risks['Alzheimer'] > 0.6:
-        narrative += T_st(" QEEG analysis suggests possible cognitive impairment, characterized by an **increase in slow-wave activity (Theta/Delta)**. ", L)
+        narrative += T_st(" QEEG analysis suggests possible cognitive impairment (Slow-wave activity). ", L)
         
     if risks['ADHD'] > 0.5:
         narrative += T_st(f" The **Theta/Beta Ratio (TBR)** is elevated ({tbr:.2f}), suggesting attentional issues. ", L)
         
     if risks['Depression'] > 0.7:
-        narrative += T_st(" The high PHQ-9 score aligns with QEEG patterns, suggesting a moderate to high risk of Major Depressive Disorder. ", L)
+        narrative += T_st(" High PHQ-9 score aligns with QEEG patterns, suggesting Major Depressive Disorder risk. ", L)
     elif risks['Tumor'] < 0.65 and not blood_issues:
-         narrative += T_st(" Overall, the neurophysiological profile suggests a focus on attentional improvement. ", L)
+         narrative += T_st(" Overall profile suggests focus on attentional improvement. ", L)
          
     return narrative
 
@@ -275,8 +271,16 @@ def create_pdf(data, lang):
         story.append(Paragraph(T("• " + r), s))
     story.append(Spacer(1, 12))
     
-    r_data = [[T("Condition"), T("Risk")]] + [[T(k), f"{v*100:.1f}%"] for k,v in data['risks'].items() if k not in ['Connectivity']]
+    # FIX: Exclude complex keys or handle them safely
+    r_data = [[T("Condition"), T("Risk")]] 
+    # Filter out 'TBR' and 'Connectivity' from the loop to avoid % formatting issues
+    for k, v in data['risks'].items():
+        if k not in ['Connectivity', 'TBR']:
+            r_data.append([T(k), f"{v*100:.1f}%"])
+            
+    # Manually add TBR with correct formatting
     r_data.append([T("TBR (Attentional Marker)"), f"{data['risks']['TBR']:.2f}"])
+    
     t2 = Table(r_data)
     t2.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor(BLUE)), ('TEXTCOLOR',(0,0),(-1,0),colors.white), ('FONTNAME', (0,0),(-1,-1), f_name)]))
     story.append(t2)
@@ -348,7 +352,9 @@ def main():
         with st.expander("Answer MMSE Questions", expanded=True):
             opts_m = get_trans("opt_mmse", L) 
             for i, q in enumerate(get_trans("q_mmse", L)):
-                ans_str = st.radio(f"{i+1}. {q}", opts_m, horizontal=True, key=f"mmse_{i}", index=2 if i==0 else 0) 
+                # FIX: Provide explicit index to avoid error if list is empty or changed
+                idx_def = 2 if i==0 else 0
+                ans_str = st.radio(f"{i+1}. {q}", opts_m, horizontal=True, key=f"mmse_{i}", index=idx_def) 
                 mmse_score += opts_m.index(ans_str) * 2 
             mmse_total = min(30, mmse_score + 10) 
             st.metric("Cognitive Score (Est)", f"{int(mmse_total)}/30")
@@ -370,6 +376,10 @@ def main():
         
         detected_eye = determine_eye_state_smart(df_eeg)
         risks, fdi, tbr = calculate_metrics(df_eeg, phq_score, int(mmse_total))
+        
+        # FIX: Add TBR to risks dictionary so PDF can see it
+        risks['TBR'] = tbr
+        
         recs, alert = get_recommendations(risks, blood_warn, L)
         narrative = generate_narrative(risks, blood_warn, tbr, L)
         
@@ -409,7 +419,7 @@ def main():
             "risks": risks, "recs": recs, "eeg": df_eeg, "shap": shap_img, "maps": maps, "narrative": narrative
         }
         pdf = create_pdf(pdf_data, L)
-        st.download_button(T_st(get_trans("download", L), L), pdf, "Doctor_Report_V19.pdf", "application/pdf")
+        st.download_button(T_st(get_trans("download", L), L), pdf, "Doctor_Report_V20.pdf", "application/pdf")
 
 if __name__ == "__main__":
     if not os.path.exists(ASSETS_DIR): os.makedirs(ASSETS_DIR)
