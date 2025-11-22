@@ -1,4 +1,4 @@
-# app.py — NeuroEarly Pro v19 (Advanced Clinical & Automated Narrative)
+# app.py — NeuroEarly Pro v19.1 (Fixed Dictionary Error)
 import os
 import io
 import json
@@ -25,7 +25,7 @@ import arabic_reshaper
 from bidi.algorithm import get_display
 
 # --- 1. CONFIGURATION ---
-st.set_page_config(page_title="NeuroEarly Pro v19", layout="wide", page_icon="🧠")
+st.set_page_config(page_title="NeuroEarly Pro v19.1", layout="wide", page_icon="🧠")
 
 ASSETS_DIR = "assets"
 LOGO_PATH = os.path.join(ASSETS_DIR, "goldenbird_logo.png")
@@ -49,7 +49,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 2. LOCALIZATION (TEXTS & QUESTIONS) ---
+# --- 2. LOCALIZATION (FIXED: Added opt_mmse) ---
 TRANS = {
     "en": {
         "title": "NeuroEarly Pro: Advanced Clinical System",
@@ -71,7 +71,9 @@ TRANS = {
             "Thoughts of self-harm"
         ],
         "opt_phq": ["Not at all", "Several days", "More than half the days", "Nearly every day"],
-        "q_mmse": ["Orientation (Time/Place)", "Registration (Repeat 3 words)", "Attention (Count backwards by 7)", "Recall (Remember 3 words)", "Language (Naming objects)"]
+        "q_mmse": ["Orientation (Time/Place)", "Registration (Repeat 3 words)", "Attention (Count backwards by 7)", "Recall (Remember 3 words)", "Language (Naming objects)"],
+        # THIS WAS MISSING IN V19:
+        "opt_mmse": ["Incorrect", "Partial", "Correct"] 
     },
     "ar": {
         "title": "نظام NeuroEarly Pro: التحليل السريري المتقدم",
@@ -92,7 +94,9 @@ TRANS = {
             "بطء الحركة أو الكلام", "أفكار لإيذاء النفس"
         ],
         "opt_phq": ["أبداً", "عدة أيام", "أكثر من نصف الأيام", "يومياً تقريباً"],
-        "q_mmse": ["التوجيه (الوقت/المكان)", "التسجيل (تكرار 3 كلمات)", "الانتباه (العد العكسي)", "الاستدعاء (تذكر الكلمات)", "اللغة (تسمية الأشياء)"]
+        "q_mmse": ["التوجيه (الوقت/المكان)", "التسجيل (تكرار 3 كلمات)", "الانتباه (العد العكسي)", "الاستدعاء (تذكر الكلمات)", "اللغة (تسمية الأشياء)"],
+        # THIS WAS MISSING IN V19:
+        "opt_mmse": ["خطأ", "جزئي", "صحيح"]
     }
 }
 
@@ -134,10 +138,10 @@ def calculate_metrics(eeg_df, phq_score, mmse_score):
     
     # 2. Advanced Metrics (Biomarkers)
     tbr = eeg_df['Theta (%)'].mean() / (eeg_df['Beta (%)'].mean() + 0.01)
-    risks['ADHD'] = min(0.99, 0.1 + (tbr/4.0) if tbr > 2.5 else 0.05) # TBR > 2.5 is high for adults
+    risks['ADHD'] = min(0.99, 0.1 + (tbr/4.0) if tbr > 2.5 else 0.05) 
     
     # 3. Connectivity (Simulated)
-    conn = eeg_df['Coherence (Fp1-Fp2)'].mean() # Use the new simulated column
+    conn = eeg_df['Coherence (Fp1-Fp2)'].mean()
     risks['Connectivity'] = conn
     
     return risks, fdi, tbr
@@ -175,29 +179,26 @@ def generate_narrative(risks, blood_issues, tbr, lang):
     narrative = ""
     L = lang
     
-    # 1. Start with Metabolic findings
     if blood_issues:
         narrative += T_st("Based on the lab results, there are indications of metabolic deficiencies (e.g., ", L)
         narrative += ", ".join(blood_issues)
-        narrative += T_st("). These must be addressed first as they can influence neurophysiological readings.", L)
+        narrative += T_st("). These must be addressed first. ", L)
     else:
-        narrative += T_st("Metabolic screening is within normal limits, allowing immediate focus on neurophysiological data. ", L)
+        narrative += T_st("Metabolic screening is within normal limits. ", L)
         
-    # 2. Add EEG/Biomarker findings
     if risks['Tumor'] > 0.65:
         narrative += T_st(" **CRITICAL FINDING:** Significant focal Delta asymmetry detected, requiring immediate imaging. ", L)
     
     if risks['Alzheimer'] > 0.6:
-        narrative += T_st(" QEEG analysis suggests possible cognitive impairment, characterized by an **increase in slow-wave activity (Theta/Delta)** in the posterior regions. ", L)
+        narrative += T_st(" QEEG analysis suggests possible cognitive impairment, characterized by an **increase in slow-wave activity (Theta/Delta)**. ", L)
         
     if risks['ADHD'] > 0.5:
-        narrative += T_st(f" The **Theta/Beta Ratio (TBR)** is elevated ({tbr:.2f}), which is a strong biomarker for attentional issues. ", L)
+        narrative += T_st(f" The **Theta/Beta Ratio (TBR)** is elevated ({tbr:.2f}), suggesting attentional issues. ", L)
         
-    # 3. Add Conclusion/Risk Summary
     if risks['Depression'] > 0.7:
         narrative += T_st(" The high PHQ-9 score aligns with QEEG patterns, suggesting a moderate to high risk of Major Depressive Disorder. ", L)
     elif risks['Tumor'] < 0.65 and not blood_issues:
-         narrative += T_st(" Overall, the neurophysiological profile suggests a primary focus on attentional and executive function improvement. ", L)
+         narrative += T_st(" Overall, the neurophysiological profile suggests a focus on attentional improvement. ", L)
          
     return narrative
 
@@ -206,8 +207,8 @@ def generate_shap(df):
     feats = {
         "Frontal Theta": df['Theta (%)'].iloc[:2].mean(),
         "Occipital Alpha": df['Alpha (%)'].iloc[-2:].mean(),
-        "Theta/Beta Ratio": df['TBR'].mean(), # Use new metric
-        "Alpha Z-Score": df['Alpha Z-Score'].abs().mean(), # Use new metric
+        "Theta/Beta Ratio": df['TBR'].mean(), 
+        "Alpha Z-Score": df['Alpha Z-Score'].abs().mean(),
         "Delta Power": df['Delta (%)'].mean()
     }
     sorted_feats = sorted(feats.items(), key=lambda x: x[1], reverse=True)
@@ -252,7 +253,6 @@ def create_pdf(data, lang):
     
     story.append(Paragraph(T(data['title']), ParagraphStyle('T', fontName=f_name, fontSize=18, textColor=colors.HexColor(BLUE))))
     
-    # Patient Info Table
     info = [
         [T("Name"), T(str(data['p']['name']))], 
         [T("ID"), str(data['p']['id'])], 
@@ -264,13 +264,10 @@ def create_pdf(data, lang):
     story.append(t)
     story.append(Spacer(1, 12))
     
-    # NEW: Automated Narrative
     story.append(Paragraph(T(get_trans('narrative', lang)), ParagraphStyle('H2', fontName=f_name, fontSize=14, textColor=colors.HexColor(BLUE))))
-    # Applying the complex narrative text
     story.append(Paragraph(T(data['narrative']), ParagraphStyle('BodyText', fontName=f_name, fontSize=11)))
     story.append(Spacer(1, 12))
     
-    # Doctor's Guidance
     story.append(Paragraph(T(get_trans('doc_guide', lang)), ParagraphStyle('H2', fontName=f_name, fontSize=14, textColor=colors.HexColor(BLUE))))
     for r in data['recs']:
         c = colors.red if "MRI" in r or "حرج" in r else colors.black
@@ -278,7 +275,6 @@ def create_pdf(data, lang):
         story.append(Paragraph(T("• " + r), s))
     story.append(Spacer(1, 12))
     
-    # Risks
     r_data = [[T("Condition"), T("Risk")]] + [[T(k), f"{v*100:.1f}%"] for k,v in data['risks'].items() if k not in ['Connectivity']]
     r_data.append([T("TBR (Attentional Marker)"), f"{data['risks']['TBR']:.2f}"])
     t2 = Table(r_data)
@@ -286,7 +282,6 @@ def create_pdf(data, lang):
     story.append(t2)
     story.append(Spacer(1, 12))
     
-    # EEG Table (With Z-Score & TBR)
     story.append(Paragraph(T("Detailed QEEG Data (Rel. Power & Z-Score)"), ParagraphStyle('H2', fontName=f_name)))
     df = data['eeg'].head(10)
     cols = ['Ch'] + list(df.columns)
@@ -295,13 +290,11 @@ def create_pdf(data, lang):
     t3.setStyle(TableStyle([('GRID', (0,0),(-1,-1),0.25,colors.grey), ('FONTSIZE',(0,0),(-1,-1),8)]))
     story.append(t3)
     
-    # NEW: Methodology Section
     story.append(PageBreak())
     story.append(Paragraph(T(get_trans('methodology', lang)), ParagraphStyle('H2', fontName=f_name, fontSize=14, textColor=colors.HexColor(BLUE))))
     story.append(Paragraph(T(get_trans('method_desc', lang)), ParagraphStyle('BodyText', fontName=f_name, fontSize=10)))
     story.append(Spacer(1, 12))
     
-    # Visuals
     story.append(Paragraph("SHAP & Topography Analysis", ParagraphStyle('H2')))
     story.append(RLImage(io.BytesIO(data['shap']), width=6*inch, height=3*inch))
     story.append(Spacer(1, 12))
@@ -321,7 +314,6 @@ def main():
     with c1:
         st.markdown(f'<div class="main-header">{get_trans("title", "en")}</div>', unsafe_allow_html=True)
 
-    # --- Sidebar ---
     with st.sidebar:
         lang = st.selectbox("Language / اللغة", ["English", "العربية"])
         L = "ar" if lang == "العربية" else "en"
@@ -337,7 +329,6 @@ def main():
             lab_text = extract_text_from_pdf(lab_file)
             if len(lab_text) > 5: st.success("Lab data extracted.")
 
-    # --- Questions ---
     st.divider()
     col1, col2 = st.columns(2)
     phq_score = 0
@@ -357,47 +348,37 @@ def main():
         with st.expander("Answer MMSE Questions", expanded=True):
             opts_m = get_trans("opt_mmse", L) 
             for i, q in enumerate(get_trans("q_mmse", L)):
-                ans_str = st.radio(f"{i+1}. {q}", opts_m, horizontal=True, key=f"mmse_{i}", index=2 if i==0 else 0) # Pre-fill 
-                mmse_score += opts_m.index(ans_str) * 2 # Simplified scoring
-            mmse_total = min(30, mmse_score + 10) # Base score adjustment
+                ans_str = st.radio(f"{i+1}. {q}", opts_m, horizontal=True, key=f"mmse_{i}", index=2 if i==0 else 0) 
+                mmse_score += opts_m.index(ans_str) * 2 
+            mmse_total = min(30, mmse_score + 10) 
             st.metric("Cognitive Score (Est)", f"{int(mmse_total)}/30")
 
-    # --- Analysis ---
     st.divider()
     uploaded_edf = st.file_uploader("Upload EEG (EDF)", type=["edf"])
     
     if st.button(T_st(get_trans("analyze", L), L), type="primary"):
-        # 1. Blood
         blood_warn = scan_blood_work(lab_text)
         
-        # 2. Advanced EEG Simulation (WITH TBR, Z-Score, Coherence)
         ch_names = ["Fp1", "Fp2", "F3", "F4", "C3", "C4", "P3", "P4", "O1", "O2"]
         data = np.random.uniform(2, 10, (10, 4))
-        
-        # Add high TBR for demo (Theta/Beta ratio)
         data[:, 1] = data[:, 1] * 1.5 
         
         df_eeg = pd.DataFrame(data, columns=['Delta (%)', 'Theta (%)', 'Alpha (%)', 'Beta (%)'], index=ch_names)
-        
-        # Calculate derived metrics
         df_eeg['TBR'] = df_eeg['Theta (%)'] / (df_eeg['Beta (%)'] + 0.01)
-        df_eeg['Alpha Z-Score'] = np.random.uniform(-2.5, 3.5, 10) # Simulated Z-Score
-        df_eeg['Coherence (Fp1-Fp2)'] = np.random.uniform(0.1, 0.5, 10) # Simulated Coherence
+        df_eeg['Alpha Z-Score'] = np.random.uniform(-2.5, 3.5, 10) 
+        df_eeg['Coherence (Fp1-Fp2)'] = np.random.uniform(0.1, 0.5, 10)
         
-        # 3. Processing
         detected_eye = determine_eye_state_smart(df_eeg)
         risks, fdi, tbr = calculate_metrics(df_eeg, phq_score, int(mmse_total))
         recs, alert = get_recommendations(risks, blood_warn, L)
-        narrative = generate_narrative(risks, blood_issues, tbr, L)
+        narrative = generate_narrative(risks, blood_warn, tbr, L)
         
         shap_img = generate_shap(df_eeg)
         maps = {b: generate_topomap(df_eeg, b) for b in BANDS}
         
-        # 4. Dashboard
         st.info(f"**AI Detected Eye State:** {detected_eye}")
         final_eye = st.radio("Confirm Eye State:", ["Eyes Open", "Eyes Closed"], index=0 if detected_eye=="Eyes Open" else 1)
         
-        # Automated Narrative UI
         st.markdown(f"""
         <div class="narrative-box">
             <h3>📝 {T_st(get_trans('narrative', L), L)}</h3>
@@ -405,7 +386,6 @@ def main():
         </div>
         """, unsafe_allow_html=True)
         
-        # Doctor Note UI
         st.markdown(f"""
         <div class="doctor-note">
             <h3>👨‍⚕️ {T_st(get_trans('doc_guide', L), L)}</h3>
@@ -423,7 +403,6 @@ def main():
         st.subheader("Brain Topography Preview")
         st.image(list(maps.values()), width=150, caption=list(maps.keys()))
 
-        # PDF
         pdf_data = {
             "title": get_trans("title", L),
             "p": {"name": p_name, "id": p_id, "labs": ", ".join(blood_warn) if blood_warn else "Normal", "eye": final_eye},
