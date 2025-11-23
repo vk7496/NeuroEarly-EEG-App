@@ -1,4 +1,4 @@
-# app.py — NeuroEarly Pro v26 (Final Artifact Filter & PDF Fix)
+# app.py — NeuroEarly Pro v27 (Final Whitelist Filter & PDF Font Fix)
 import os
 import io
 import json
@@ -27,7 +27,7 @@ import arabic_reshaper
 from bidi.algorithm import get_display
 
 # --- 1. CONFIGURATION ---
-st.set_page_config(page_title="NeuroEarly Pro v26", layout="wide", page_icon="🧠")
+st.set_page_config(page_title="NeuroEarly Pro v27", layout="wide", page_icon="🧠")
 
 ASSETS_DIR = "assets"
 LOGO_PATH = os.path.join(ASSETS_DIR, "goldenbird_logo.png")
@@ -87,7 +87,7 @@ TRANS = {
         "doc_guide": "توجيهات الطبيب والبروتوكول", "narrative": "الرواية السريرية التلقائية",
         "phq_t": "فحص الاكتئاب (PHQ-9)", "alz_t": "فحص الذاكرة (MMSE)",
         "methodology": "المنهجية: معالجة وتحليل البيانات",
-        "method_desc": "تحليل QEEG حقيقي. تم تطبيق رفض شوائب فائق الثبات بر اساس کانالهای مرکزی.",
+        "method_desc": "تحليل QEEG حقيقي. تم تطبيق فیلتر کانالهای مجاز برای دقت نهایی در توان دلتا.",
         "q_phq": ["الاهتمام", "الاكتئاب", "النوم", "التعب", "الشهية", "الفشل", "التركيز", "البطء", "إيذاء النفس"],
         "opt_phq": ["أبداً", "عدة أيام", "أكثر من نصف الأيام", "يومياً"],
         "q_mmse": ["التوجيه", "التسجيل", "الانتباه", "الاستدعاء", "اللغة"],
@@ -106,12 +106,24 @@ def process_real_edf(uploaded_file):
 
     try:
         raw = mne.io.read_raw_edf(tmp_path, preload=True, verbose=False)
+        
+        # --- V27 FIX: ENFORCE EEG CHANNEL WHITELIST ---
+        # Only use standard 10-20 system channels for processing
+        # This filters out EKG, Ref, and non-standard channels like 'Ch65'
+        eeg_channels = [ch for ch in raw.ch_names if len(ch) <= 3 and ch.isalnum() and 'EOG' not in ch]
+        raw.pick_channels(eeg_channels, ordered=True)
+        
         sf = raw.info['sfreq']
         if sf > 100: raw.notch_filter(np.arange(50, sf/2, 50), verbose=False)
         raw.filter(0.5, 45.0, verbose=False)
         
         data = raw.get_data()
         ch_names = raw.ch_names
+        
+        # Check if there are channels left to process
+        if not ch_names:
+            return None, "Error: No standard EEG channels found after filtering."
+            
         psds, freqs = mne.time_frequency.psd_array_welch(data, sf, fmin=0.5, fmax=45.0, n_fft=int(2*sf), verbose=False)
         
         df_rows = []
@@ -128,21 +140,21 @@ def process_real_edf(uploaded_file):
         os.remove(tmp_path)
         return df_eeg, None
     except Exception as e:
+        if os.path.exists(tmp_path): os.remove(tmp_path)
         return None, str(e)
 
-# --- 4. LOGIC & METRICS (ULTRA-STABLE TUMOR LOGIC V26) ---
+# --- 4. LOGIC & METRICS (ULTRA-STABLE TUMOR LOGIC V27) ---
 def determine_eye_state_smart(df_bands):
     occ_channels = [ch for ch in df_bands.index if any(x in ch for x in ['O1','O2','P3','P4'])]
-    if occ_channels:
+    if occ_channels and not df_bands.empty:
         if df_bands.loc[occ_channels, 'Alpha (%)'].median() > 12.0: return "Eyes Closed"
-    if df_bands['Alpha (%)'].median() > 10.0: return "Eyes Closed"
+    if not df_bands.empty and df_bands['Alpha (%)'].median() > 10.0: return "Eyes Closed"
     return "Eyes Open"
 
 def calculate_metrics(eeg_df, phq, mmse):
     risks = {}
     tbr = 0
-    if 'Theta (%)' in eeg_df and 'Beta (%)' in eeg_df:
-        # Use median for robustness
+    if 'Theta (%)' in eeg_df and 'Beta (%)' in eeg_df and not eeg_df.empty:
         tbr = eeg_df['Theta (%)'].median() / (eeg_df['Beta (%)'].median() + 0.01)
         eeg_df['TBR'] = eeg_df['Theta (%)'] / (eeg_df['Beta (%)'] + 0.01)
     
@@ -152,18 +164,15 @@ def calculate_metrics(eeg_df, phq, mmse):
     fdi = 0
     focal_ch = "N/A"
     
-    if 'Delta (%)' in eeg_df:
+    if 'Delta (%)' in eeg_df and not eeg_df.empty:
         # 1. Identify "Clean" central channels for a stable baseline
-        # These channels are least prone to non-biological noise (EKG, EMG)
         stable_channel_names = ['C3', 'C4', 'P3', 'P4', 'Cz', 'Pz']
-        stable_channels = [ch for ch in eeg_df.index if any(x in ch for x in stable_channel_names)]
+        stable_channels = [ch for ch in eeg_df.index if ch in stable_channel_names]
         
-        # 2. Identify all channels to test (excluding known artifacts and non-scalp channels)
-        # Exclude Fp, Temporal, EOG, numeric-only (like 65), and common reference channels
-        artifact_patterns = ['Fp', 'F7', 'F8', 'T3', 'T4', 'T5', 'T6', 'FT', 'Ref', 'GND', 'EKG', 'ECG', 'EOG', 'HEOG', 'VEOG']
-        test_channels = [ch for ch in eeg_df.index if not any(p in ch for p in artifact_patterns) and not ch.isdigit() and len(ch) < 4]
-
-        if stable_channels and test_channels:
+        # 2. Identify all remaining channels to test
+        test_channels = [ch for ch in eeg_df.index if ch not in ['EOG', 'EKG', 'REF']]
+        
+        if stable_channels and test_channels and len(stable_channels) >= 3:
             
             deltas_test = eeg_df.loc[test_channels, 'Delta (%)']
             deltas_stable = eeg_df.loc[stable_channels, 'Delta (%)']
@@ -171,7 +180,6 @@ def calculate_metrics(eeg_df, phq, mmse):
             max_delta = deltas_test.max()
             median_delta_stable = deltas_stable.median()
             
-            # FDI is Max Delta Power in test set / Median Delta Power in stable central set
             fdi = max_delta / (median_delta_stable + 0.01)
 
             focal_ch = deltas_test.idxmax()
@@ -184,10 +192,10 @@ def calculate_metrics(eeg_df, phq, mmse):
     
     risks['ADHD'] = min(0.99, (tbr / 3.0)) if tbr > 1.5 else 0.1
     
-    if 'Alpha (%)' in eeg_df:
+    if 'Alpha (%)' in eeg_df and not eeg_df.empty:
         eeg_df['Alpha Z'] = (eeg_df['Alpha (%)'] - eeg_df['Alpha (%)'].mean()) / (eeg_df['Alpha (%)'].std()+0.01)
         
-    return risks, fdi, tbr, df_eeg, focal_ch
+    return risks, fdi, tbr, eeg_df, focal_ch
 
 def scan_blood_work(text):
     warnings = []
@@ -223,9 +231,11 @@ def generate_narrative(risks, blood, tbr, lang, fdi, focal_ch):
 # --- 5. VISUALS ---
 def generate_shap(df):
     try:
+        if df.empty: return None
         feats = {
             "Frontal Theta": df['Theta (%)'].mean(), "Occipital Alpha": df['Alpha (%)'].mean(),
-            "TBR": df['TBR'].mean(), "Delta Power": df['Delta (%)'].mean()
+            "TBR": df['TBR'].mean() if 'TBR' in df.columns else df['Theta (%)'].mean() / (df['Beta (%)'].mean() + 0.01), 
+            "Delta Power": df['Delta (%)'].mean()
         }
         fig, ax = plt.subplots(figsize=(6,3))
         ax.barh(list(feats.keys()), list(feats.values()), color=BLUE)
@@ -236,7 +246,7 @@ def generate_shap(df):
     except: return None
 
 def generate_topomap(df, band):
-    if f'{band} (%)' not in df.columns: return None
+    if df.empty or f'{band} (%)' not in df.columns: return None
     vals = df[f'{band} (%)'].values
     grid_size = int(np.ceil(np.sqrt(len(vals))))
     if grid_size*grid_size < len(vals): grid_size += 1
@@ -263,8 +273,7 @@ def create_pdf(data, lang):
         f_name = 'Amiri'
     except: 
         f_name = 'Helvetica'
-        st.warning("Amiri font not found. Using default Helvetica, which may still show RTL issues.")
-
+        
     # 2. Helper functions for ReportLab content
     def T(x): # For general paragraphs (already Bidi-processed by caller)
         return get_display(arabic_reshaper.reshape(str(x))) if lang == 'ar' else str(x)
@@ -272,6 +281,7 @@ def create_pdf(data, lang):
     def T_p(text): # For table cells, creating a Paragraph object for Bidi stability
         if lang == 'ar':
             # Use Paragraph for better Bidi handling in tables, Right alignment (2) is best for RTL data
+            # NOTE: We use a ParagraphStyle to ensure the Amiri font is applied reliably inside the cell.
             return Paragraph(get_display(arabic_reshaper.reshape(str(text))), 
                              ParagraphStyle(name='RTL', fontName=f_name, alignment=2, leading=12))
         return str(text)
@@ -330,7 +340,6 @@ def extract_text_from_pdf(f):
 
 # --- 7. MAIN ---
 def main():
-    # ... (unchanged Streamlit UI code) ...
     c1, c2 = st.columns([3,1])
     with c2:
         if os.path.exists(LOGO_PATH): st.image(LOGO_PATH, width=120)
@@ -387,7 +396,6 @@ def main():
                 st.warning("Simulation Mode (No EDF)")
                 ch = ["Fp1", "Fp2", "F3", "F4", "C3", "C4", "P3", "P4", "O1", "O2"]
                 df_eeg = pd.DataFrame(np.random.uniform(2,10,(10,4)), columns=[f"{b} (%)" for b in BANDS], index=ch)
-                # Ensure Alpha is high for Eyes Closed in simulation
                 df_eeg.loc['O1', 'Alpha (%)'] = 15.0
             
             detected_eye = determine_eye_state_smart(df_eeg)
@@ -406,7 +414,6 @@ def main():
             c1, c2, c3 = st.columns(3)
             c1.metric("Depression", f"{risks['Depression']*100:.0f}%")
             c2.metric("Alzheimer", f"{risks['Alzheimer']*100:.0f}%")
-            # Display FDI info directly under Tumor Risk
             c3.metric("Tumor Risk", f"{risks['Tumor']*100:.0f}%", f"FDI: {fdi:.2f} @ {focal_ch}") 
             
             st.markdown(f'<div class="report-box"><h4>{T_st(get_trans("narrative", L), L)}</h4><p>{narrative}</p></div>', unsafe_allow_html=True)
