@@ -1,4 +1,4 @@
-# app.py — NeuroEarly Pro v24 (Artifact Rejection & Stable)
+# app.py — NeuroEarly Pro v25 (Artifact Guardian - Stable Clinical Release)
 import os
 import io
 import json
@@ -27,7 +27,7 @@ import arabic_reshaper
 from bidi.algorithm import get_display
 
 # --- 1. CONFIGURATION ---
-st.set_page_config(page_title="NeuroEarly Pro v24", layout="wide", page_icon="🧠")
+st.set_page_config(page_title="NeuroEarly Pro v25", layout="wide", page_icon="🧠")
 
 ASSETS_DIR = "assets"
 LOGO_PATH = os.path.join(ASSETS_DIR, "goldenbird_logo.png")
@@ -68,7 +68,7 @@ TRANS = {
         "doc_guide": "Doctor's Guidance & Protocol", "narrative": "Automated Clinical Narrative",
         "phq_t": "Depression Screening (PHQ-9)", "alz_t": "Cognitive Screening (MMSE)",
         "methodology": "Methodology: Data Processing & Analysis",
-        "method_desc": "Real QEEG analysis via MNE-Python. Artifact rejection applied (Fp1/Fp2 exclusion for Delta). Signal filtered (0.5-45Hz).",
+        "method_desc": "Real QEEG analysis via MNE-Python. Robust artifact rejection applied for Delta power.",
         "q_phq": ["Little interest", "Feeling down", "Sleep issues", "Tiredness", "Appetite", "Failure", "Concentration", "Slowness", "Self-harm"],
         "opt_phq": ["Not at all", "Several days", "More than half", "Nearly every day"],
         "q_mmse": ["Orientation", "Registration", "Attention", "Recall", "Language"],
@@ -87,7 +87,7 @@ TRANS = {
         "doc_guide": "توجيهات الطبيب والبروتوكول", "narrative": "الرواية السريرية التلقائية",
         "phq_t": "فحص الاكتئاب (PHQ-9)", "alz_t": "فحص الذاكرة (MMSE)",
         "methodology": "المنهجية: معالجة وتحليل البيانات",
-        "method_desc": "تحليل QEEG حقيقي. تم تطبيق رفض الشوائب (استبعاد Fp1/Fp2 للدلتا).",
+        "method_desc": "تحليل QEEG حقيقي. تم تطبيق رفض شوائب قوي على طاقة الدلتا.",
         "q_phq": ["الاهتمام", "الاكتئاب", "النوم", "التعب", "الشهية", "الفشل", "التركيز", "البطء", "إيذاء النفس"],
         "opt_phq": ["أبداً", "عدة أيام", "أكثر من نصف الأيام", "يومياً"],
         "q_mmse": ["التوجيه", "التسجيل", "الانتباه", "الاستدعاء", "اللغة"],
@@ -107,14 +107,11 @@ def process_real_edf(uploaded_file):
     try:
         raw = mne.io.read_raw_edf(tmp_path, preload=True, verbose=False)
         sf = raw.info['sfreq']
-        # Robust Filtering
         if sf > 100: raw.notch_filter(np.arange(50, sf/2, 50), verbose=False)
         raw.filter(0.5, 45.0, verbose=False)
         
         data = raw.get_data()
         ch_names = raw.ch_names
-        
-        # PSD
         psds, freqs = mne.time_frequency.psd_array_welch(data, sf, fmin=0.5, fmax=45.0, n_fft=int(2*sf), verbose=False)
         
         df_rows = []
@@ -133,9 +130,8 @@ def process_real_edf(uploaded_file):
     except Exception as e:
         return None, str(e)
 
-# --- 4. LOGIC & METRICS (FIXED TUMOR LOGIC) ---
+# --- 4. LOGIC & METRICS (FIXED TUMOR LOGIC V25) ---
 def determine_eye_state_smart(df_bands):
-    # Look for O1/O2/P3/P4
     occ_channels = [ch for ch in df_bands.index if any(x in ch for x in ['O1','O2','P3','P4'])]
     if occ_channels:
         if df_bands.loc[occ_channels, 'Alpha (%)'].mean() > 12.0: return "Eyes Closed"
@@ -152,29 +148,47 @@ def calculate_metrics(eeg_df, phq, mmse):
     risks['Depression'] = min(0.99, (phq / 27.0)*0.6 + 0.1)
     risks['Alzheimer'] = min(0.99, ((10-mmse)/10.0)*0.7 + 0.1)
     
-    # --- CRITICAL FIX: ARTIFACT REJECTION FOR TUMOR ---
+    # --- CRITICAL FIX: ULTRA-ROBUST ARTIFACT REJECTION FOR TUMOR (V25) ---
     fdi = 0
+    focal_ch = "N/A"
+    
     if 'Delta (%)' in eeg_df:
-        # Filter out Fp1/Fp2/F7/F8 from Tumor calculation (Eye/Muscle Artifacts)
-        clean_channels = [ch for ch in eeg_df.index if not any(x in ch for x in ['Fp1','Fp2','F7','F8'])]
+        # 1. Filter out known artifact channels (Eye, Muscle, Temporal/Frontal)
+        artifact_channels = ['Fp1', 'Fp2', 'F7', 'F8', 'T3', 'T4', 'T5', 'T6', 'FT9', 'FT10']
+        clean_channels = [ch for ch in eeg_df.index if not any(x in ch for x in artifact_channels)]
         
-        if clean_channels:
+        deltas_all = eeg_df['Delta (%)']
+        
+        if clean_channels and len(clean_channels) >= 3:
             deltas_clean = eeg_df.loc[clean_channels, 'Delta (%)']
-            # Use Median instead of Mean for robustness against single channel noise
-            fdi = deltas_clean.max() / (deltas_clean.median() + 0.01)
-        else:
-            # Fallback if only frontal channels exist
-            fdi = eeg_df['Delta (%)'].max() / (eeg_df['Delta (%)'].mean() + 0.01)
+            
+            max_delta = deltas_clean.max()
+            median_delta = deltas_all.median() # Use median of all channels for a stable baseline
+            
+            fdi = max_delta / (median_delta + 0.01)
 
-        # Tumor Threshold: FDI > 3.0 is suspicious
-        risks['Tumor'] = min(0.99, (fdi - 3.0)/5.0) if fdi > 3.0 else 0.05
-        
+            # Identify the channel that caused the max value in the CLEAN set
+            focal_ch = deltas_clean.idxmax()
+            
+        else: # Fallback for very few channels (less reliable)
+            max_delta = deltas_all.max()
+            mean_delta = deltas_all.mean()
+            fdi = max_delta / (mean_delta + 0.01)
+            focal_ch = deltas_all.idxmax()
+            
+        # 2. Refined Thresholding (Requires FDI > 3.5 to start increasing risk significantly)
+        # Denominator (7.0) is higher for stability.
+        risk_calc = max(0.05, (fdi - 3.5) / 7.0) 
+        risks['Tumor'] = min(0.99, risk_calc) if fdi > 3.5 else 0.05
+    else:
+        risks['Tumor'] = 0.05
+    
     risks['ADHD'] = min(0.99, (tbr / 3.0)) if tbr > 1.5 else 0.1
     
     if 'Alpha (%)' in eeg_df:
         eeg_df['Alpha Z'] = (eeg_df['Alpha (%)'] - eeg_df['Alpha (%)'].mean()) / (eeg_df['Alpha (%)'].std()+0.01)
         
-    return risks, fdi, tbr, eeg_df
+    return risks, fdi, tbr, eeg_df, focal_ch
 
 def scan_blood_work(text):
     warnings = []
@@ -198,11 +212,11 @@ def get_recommendations(risks, blood_issues, lang):
     if not recs: recs.append(get_trans('neuro', lang))
     return recs, alert
 
-def generate_narrative(risks, blood, tbr, lang):
+def generate_narrative(risks, blood, tbr, lang, fdi, focal_ch):
     L = lang
     n = ""
     if blood: n += T_st("Lab results indicate metabolic deficiencies. ", L)
-    if risks['Tumor'] > 0.65: n += T_st(" CRITICAL: Focal Delta asymmetry detected (Lesion risk). ", L)
+    if risks['Tumor'] > 0.65: n += T_st(f" CRITICAL: Focal Delta asymmetry (FDI: {fdi:.2f} at {focal_ch}). Lesion risk must be ruled out. ", L)
     if risks['ADHD'] > 0.6: n += T_st(f" High TBR ({tbr:.2f}) suggests attentional deficit. ", L)
     if n == "": n = T_st("Neurophysiological profile is within normal range.", L)
     return n
@@ -224,6 +238,7 @@ def generate_shap(df):
 
 def generate_topomap(df, band):
     if f'{band} (%)' not in df.columns: return None
+    # (Topomap generation code remains the same as it's purely visual)
     vals = df[f'{band} (%)'].values
     grid_size = int(np.ceil(np.sqrt(len(vals))))
     if grid_size*grid_size < len(vals): grid_size += 1
@@ -234,7 +249,7 @@ def generate_topomap(df, band):
     fig, ax = plt.subplots(figsize=(3,3))
     ax.imshow(grid, cmap='jet', interpolation='bicubic')
     ax.axis('off')
-    ax.add_artist(plt.Circle((0, 0), 1, color='k', fill=False, lw=2))
+    ax.add_artist(plt.Circle((grid_size/2-0.5, grid_size/2-0.5), grid_size*0.4, color='k', fill=False, lw=2))
     buf = io.BytesIO(); plt.savefig(buf, format='png', transparent=True); plt.close(fig); buf.seek(0)
     return buf.getvalue()
 
@@ -273,6 +288,7 @@ def create_pdf(data, lang):
     for k,v in data['risks'].items(): 
         if k not in ['Connectivity', 'TBR']: r_data.append([T(k), f"{v*100:.1f}%"])
     r_data.append([T("TBR"), f"{data['tbr']:.2f}"])
+    r_data.append([T("FDI Channel"), T(data['focal_ch'])])
     t2 = Table(r_data, style=TableStyle([('GRID',(0,0),(-1,-1),0.5,colors.grey), ('FONTNAME', (0,0),(-1,-1), f_name)]))
     story.append(t2)
     
@@ -350,11 +366,12 @@ def main():
                 st.warning("Simulation Mode (No EDF)")
                 ch = ["Fp1", "Fp2", "F3", "F4", "C3", "C4", "P3", "P4", "O1", "O2"]
                 df_eeg = pd.DataFrame(np.random.uniform(2,10,(10,4)), columns=[f"{b} (%)" for b in BANDS], index=ch)
-
+                df_eeg.loc['C4', 'Delta (%)'] = 40.0 # Force a high delta spike
+            
             detected_eye = determine_eye_state_smart(df_eeg)
-            risks, fdi, tbr, df_eeg = calculate_metrics(df_eeg, phq_score, mmse_total)
+            risks, fdi, tbr, df_eeg, focal_ch = calculate_metrics(df_eeg, phq_score, mmse_total)
             recs, alert = get_recommendations(risks, blood, L)
-            narrative = generate_narrative(risks, blood, tbr, L)
+            narrative = generate_narrative(risks, blood, tbr, L, fdi, focal_ch)
             shap_img = generate_shap(df_eeg)
             maps = {b: generate_topomap(df_eeg, b) for b in BANDS}
             
@@ -367,7 +384,8 @@ def main():
             c1, c2, c3 = st.columns(3)
             c1.metric("Depression", f"{risks['Depression']*100:.0f}%")
             c2.metric("Alzheimer", f"{risks['Alzheimer']*100:.0f}%")
-            c3.metric("Tumor Risk", f"{risks['Tumor']*100:.0f}%")
+            # New Metric includes source of anomaly
+            c3.metric("Tumor Risk", f"{risks['Tumor']*100:.0f}%", f"FDI: {fdi:.2f} @ {focal_ch}") 
             
             st.markdown(f'<div class="report-box"><h4>{T_st(get_trans("narrative", L), L)}</h4><p>{narrative}</p></div>', unsafe_allow_html=True)
             st.dataframe(df_eeg.style.background_gradient(cmap='Blues'), height=200)
@@ -378,7 +396,7 @@ def main():
             pdf_data = {
                 "title": get_trans("title", L),
                 "p": {"name": p_name, "gender": p_gender, "dob": str(p_dob), "id": p_id, "labs": str(blood), "eye": final_eye},
-                "risks": risks, "tbr": tbr, "recs": recs, "eeg": df_eeg, "shap": shap_img, "maps": maps, "narrative": narrative
+                "risks": risks, "tbr": tbr, "recs": recs, "eeg": df_eeg, "shap": shap_img, "maps": maps, "narrative": narrative, "focal_ch": focal_ch
             }
             st.download_button(T_st(get_trans("download", L), L), create_pdf(pdf_data, L), "Report.pdf", "application/pdf")
 
