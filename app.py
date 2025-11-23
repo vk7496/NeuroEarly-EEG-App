@@ -1,4 +1,4 @@
-# app.py — NeuroEarly Pro v25 (Artifact Guardian - Stable Clinical Release)
+# app.py — NeuroEarly Pro v26 (Final Artifact Filter & PDF Fix)
 import os
 import io
 import json
@@ -27,7 +27,7 @@ import arabic_reshaper
 from bidi.algorithm import get_display
 
 # --- 1. CONFIGURATION ---
-st.set_page_config(page_title="NeuroEarly Pro v25", layout="wide", page_icon="🧠")
+st.set_page_config(page_title="NeuroEarly Pro v26", layout="wide", page_icon="🧠")
 
 ASSETS_DIR = "assets"
 LOGO_PATH = os.path.join(ASSETS_DIR, "goldenbird_logo.png")
@@ -68,7 +68,7 @@ TRANS = {
         "doc_guide": "Doctor's Guidance & Protocol", "narrative": "Automated Clinical Narrative",
         "phq_t": "Depression Screening (PHQ-9)", "alz_t": "Cognitive Screening (MMSE)",
         "methodology": "Methodology: Data Processing & Analysis",
-        "method_desc": "Real QEEG analysis via MNE-Python. Robust artifact rejection applied for Delta power.",
+        "method_desc": "Real QEEG analysis via MNE-Python. Ultra-robust artifact rejection applied for Delta power.",
         "q_phq": ["Little interest", "Feeling down", "Sleep issues", "Tiredness", "Appetite", "Failure", "Concentration", "Slowness", "Self-harm"],
         "opt_phq": ["Not at all", "Several days", "More than half", "Nearly every day"],
         "q_mmse": ["Orientation", "Registration", "Attention", "Recall", "Language"],
@@ -87,7 +87,7 @@ TRANS = {
         "doc_guide": "توجيهات الطبيب والبروتوكول", "narrative": "الرواية السريرية التلقائية",
         "phq_t": "فحص الاكتئاب (PHQ-9)", "alz_t": "فحص الذاكرة (MMSE)",
         "methodology": "المنهجية: معالجة وتحليل البيانات",
-        "method_desc": "تحليل QEEG حقيقي. تم تطبيق رفض شوائب قوي على طاقة الدلتا.",
+        "method_desc": "تحليل QEEG حقيقي. تم تطبيق رفض شوائب فائق الثبات بر اساس کانالهای مرکزی.",
         "q_phq": ["الاهتمام", "الاكتئاب", "النوم", "التعب", "الشهية", "الفشل", "التركيز", "البطء", "إيذاء النفس"],
         "opt_phq": ["أبداً", "عدة أيام", "أكثر من نصف الأيام", "يومياً"],
         "q_mmse": ["التوجيه", "التسجيل", "الانتباه", "الاستدعاء", "اللغة"],
@@ -130,56 +130,55 @@ def process_real_edf(uploaded_file):
     except Exception as e:
         return None, str(e)
 
-# --- 4. LOGIC & METRICS (FIXED TUMOR LOGIC V25) ---
+# --- 4. LOGIC & METRICS (ULTRA-STABLE TUMOR LOGIC V26) ---
 def determine_eye_state_smart(df_bands):
     occ_channels = [ch for ch in df_bands.index if any(x in ch for x in ['O1','O2','P3','P4'])]
     if occ_channels:
-        if df_bands.loc[occ_channels, 'Alpha (%)'].mean() > 12.0: return "Eyes Closed"
-    if df_bands['Alpha (%)'].mean() > 10.0: return "Eyes Closed"
+        if df_bands.loc[occ_channels, 'Alpha (%)'].median() > 12.0: return "Eyes Closed"
+    if df_bands['Alpha (%)'].median() > 10.0: return "Eyes Closed"
     return "Eyes Open"
 
 def calculate_metrics(eeg_df, phq, mmse):
     risks = {}
     tbr = 0
     if 'Theta (%)' in eeg_df and 'Beta (%)' in eeg_df:
-        tbr = eeg_df['Theta (%)'].mean() / (eeg_df['Beta (%)'].mean() + 0.01)
+        # Use median for robustness
+        tbr = eeg_df['Theta (%)'].median() / (eeg_df['Beta (%)'].median() + 0.01)
         eeg_df['TBR'] = eeg_df['Theta (%)'] / (eeg_df['Beta (%)'] + 0.01)
     
     risks['Depression'] = min(0.99, (phq / 27.0)*0.6 + 0.1)
     risks['Alzheimer'] = min(0.99, ((10-mmse)/10.0)*0.7 + 0.1)
     
-    # --- CRITICAL FIX: ULTRA-ROBUST ARTIFACT REJECTION FOR TUMOR (V25) ---
     fdi = 0
     focal_ch = "N/A"
     
     if 'Delta (%)' in eeg_df:
-        # 1. Filter out known artifact channels (Eye, Muscle, Temporal/Frontal)
-        artifact_channels = ['Fp1', 'Fp2', 'F7', 'F8', 'T3', 'T4', 'T5', 'T6', 'FT9', 'FT10']
-        clean_channels = [ch for ch in eeg_df.index if not any(x in ch for x in artifact_channels)]
+        # 1. Identify "Clean" central channels for a stable baseline
+        # These channels are least prone to non-biological noise (EKG, EMG)
+        stable_channel_names = ['C3', 'C4', 'P3', 'P4', 'Cz', 'Pz']
+        stable_channels = [ch for ch in eeg_df.index if any(x in ch for x in stable_channel_names)]
         
-        deltas_all = eeg_df['Delta (%)']
-        
-        if clean_channels and len(clean_channels) >= 3:
-            deltas_clean = eeg_df.loc[clean_channels, 'Delta (%)']
-            
-            max_delta = deltas_clean.max()
-            median_delta = deltas_all.median() # Use median of all channels for a stable baseline
-            
-            fdi = max_delta / (median_delta + 0.01)
+        # 2. Identify all channels to test (excluding known artifacts and non-scalp channels)
+        # Exclude Fp, Temporal, EOG, numeric-only (like 65), and common reference channels
+        artifact_patterns = ['Fp', 'F7', 'F8', 'T3', 'T4', 'T5', 'T6', 'FT', 'Ref', 'GND', 'EKG', 'ECG', 'EOG', 'HEOG', 'VEOG']
+        test_channels = [ch for ch in eeg_df.index if not any(p in ch for p in artifact_patterns) and not ch.isdigit() and len(ch) < 4]
 
-            # Identify the channel that caused the max value in the CLEAN set
-            focal_ch = deltas_clean.idxmax()
+        if stable_channels and test_channels:
             
-        else: # Fallback for very few channels (less reliable)
-            max_delta = deltas_all.max()
-            mean_delta = deltas_all.mean()
-            fdi = max_delta / (mean_delta + 0.01)
-            focal_ch = deltas_all.idxmax()
+            deltas_test = eeg_df.loc[test_channels, 'Delta (%)']
+            deltas_stable = eeg_df.loc[stable_channels, 'Delta (%)']
             
-        # 2. Refined Thresholding (Requires FDI > 3.5 to start increasing risk significantly)
-        # Denominator (7.0) is higher for stability.
-        risk_calc = max(0.05, (fdi - 3.5) / 7.0) 
-        risks['Tumor'] = min(0.99, risk_calc) if fdi > 3.5 else 0.05
+            max_delta = deltas_test.max()
+            median_delta_stable = deltas_stable.median()
+            
+            # FDI is Max Delta Power in test set / Median Delta Power in stable central set
+            fdi = max_delta / (median_delta_stable + 0.01)
+
+            focal_ch = deltas_test.idxmax()
+            
+        # 3. Refined Thresholding (FDI > 4.0 is suspicious, Denominator (10.0) provides high stability)
+        risk_calc = max(0.05, (fdi - 4.0) / 10.0) 
+        risks['Tumor'] = min(0.99, risk_calc) if fdi > 4.0 else 0.05
     else:
         risks['Tumor'] = 0.05
     
@@ -188,7 +187,7 @@ def calculate_metrics(eeg_df, phq, mmse):
     if 'Alpha (%)' in eeg_df:
         eeg_df['Alpha Z'] = (eeg_df['Alpha (%)'] - eeg_df['Alpha (%)'].mean()) / (eeg_df['Alpha (%)'].std()+0.01)
         
-    return risks, fdi, tbr, eeg_df, focal_ch
+    return risks, fdi, tbr, df_eeg, focal_ch
 
 def scan_blood_work(text):
     warnings = []
@@ -238,7 +237,6 @@ def generate_shap(df):
 
 def generate_topomap(df, band):
     if f'{band} (%)' not in df.columns: return None
-    # (Topomap generation code remains the same as it's purely visual)
     vals = df[f'{band} (%)'].values
     grid_size = int(np.ceil(np.sqrt(len(vals))))
     if grid_size*grid_size < len(vals): grid_size += 1
@@ -253,43 +251,65 @@ def generate_topomap(df, band):
     buf = io.BytesIO(); plt.savefig(buf, format='png', transparent=True); plt.close(fig); buf.seek(0)
     return buf.getvalue()
 
-# --- 6. PDF ---
+# --- 6. PDF (FIXED RTL/ARABIC TEXT) ---
 def create_pdf(data, lang):
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4)
     styles = getSampleStyleSheet()
-    try: pdfmetrics.registerFont(TTFont('Amiri', FONT_PATH)); f_name = 'Amiri'
-    except: f_name = 'Helvetica'
-    def T(x): return get_display(arabic_reshaper.reshape(str(x))) if lang == 'ar' else str(x)
+    
+    # 1. Font Registration
+    try: 
+        pdfmetrics.registerFont(TTFont('Amiri', FONT_PATH))
+        f_name = 'Amiri'
+    except: 
+        f_name = 'Helvetica'
+        st.warning("Amiri font not found. Using default Helvetica, which may still show RTL issues.")
+
+    # 2. Helper functions for ReportLab content
+    def T(x): # For general paragraphs (already Bidi-processed by caller)
+        return get_display(arabic_reshaper.reshape(str(x))) if lang == 'ar' else str(x)
+        
+    def T_p(text): # For table cells, creating a Paragraph object for Bidi stability
+        if lang == 'ar':
+            # Use Paragraph for better Bidi handling in tables, Right alignment (2) is best for RTL data
+            return Paragraph(get_display(arabic_reshaper.reshape(str(text))), 
+                             ParagraphStyle(name='RTL', fontName=f_name, alignment=2, leading=12))
+        return str(text)
+
     
     story = []
     if os.path.exists(LOGO_PATH): story.append(RLImage(LOGO_PATH, width=1.5*inch, height=1.5*inch))
     story.append(Paragraph(T(data['title']), ParagraphStyle('T', fontName=f_name, fontSize=18, textColor=colors.HexColor(BLUE))))
     
+    # Patient Info Table (Using T_p for Bidi stability)
     p = data['p']
     info = [
-        [T(get_trans("name",lang)), T(p['name']), T(get_trans("id",lang)), T(p['id'])],
-        [T(get_trans("gender",lang)), T(p['gender']), T(get_trans("dob",lang)), T(p['dob'])],
-        [T("Eye State"), T(p['eye']), T("Labs"), T(p['labs'])]
+        [T_p(get_trans("name",lang)), T_p(p['name']), T_p(get_trans("id",lang)), T_p(p['id'])],
+        [T_p(get_trans("gender",lang)), T_p(p['gender']), T_p(get_trans("dob",lang)), T_p(p['dob'])],
+        [T_p("Eye State"), T_p(p['eye']), T_p("Labs"), T_p(p['labs'])]
     ]
     t = Table(info, colWidths=[1.2*inch, 2*inch, 1.2*inch, 2*inch])
-    t.setStyle(TableStyle([('GRID',(0,0),(-1,-1),0.5,colors.grey), ('FONTNAME', (0,0),(-1,-1), f_name)]))
+    t.setStyle(TableStyle([('GRID',(0,0),(-1,-1),0.5,colors.grey), 
+                           ('FONTNAME', (0,0),(-1,-1), f_name)]))
     story.append(t)
     story.append(Spacer(1,10))
     
-    story.append(Paragraph(T(data['narrative']), ParagraphStyle('B', fontName=f_name)))
+    # Narrative and Recommendations (Using T for paragraphs)
+    story.append(Paragraph(T(data['narrative']), ParagraphStyle('B', fontName=f_name, fontSize=10)))
     story.append(Spacer(1,10))
     
     for r in data['recs']:
         c = colors.red if "MRI" in r or "حرج" in r else colors.black
-        story.append(Paragraph(T(r), ParagraphStyle('A', fontName=f_name, textColor=c)))
+        story.append(Paragraph(T(r), ParagraphStyle('A', fontName=f_name, textColor=c, fontSize=10)))
         
-    r_data = [[T("Condition"), T("Risk")]]
+    # Risks Table (Using T_p for Bidi stability)
+    r_data = [[T_p("Condition"), T_p("Risk")]]
     for k,v in data['risks'].items(): 
-        if k not in ['Connectivity', 'TBR']: r_data.append([T(k), f"{v*100:.1f}%"])
-    r_data.append([T("TBR"), f"{data['tbr']:.2f}"])
-    r_data.append([T("FDI Channel"), T(data['focal_ch'])])
-    t2 = Table(r_data, style=TableStyle([('GRID',(0,0),(-1,-1),0.5,colors.grey), ('FONTNAME', (0,0),(-1,-1), f_name)]))
+        if k not in ['Connectivity', 'TBR']: r_data.append([T_p(k), T_p(f"{v*100:.1f}%")])
+    r_data.append([T_p("TBR"), T_p(f"{data['tbr']:.2f}")])
+    r_data.append([T_p("FDI Channel"), T_p(data['focal_ch'])])
+    t2 = Table(r_data, style=TableStyle([('GRID',(0,0),(-1,-1),0.5,colors.grey), 
+                                         ('FONTNAME', (0,0),(-1,-1), f_name)]))
     story.append(t2)
     
     story.append(PageBreak())
@@ -310,6 +330,7 @@ def extract_text_from_pdf(f):
 
 # --- 7. MAIN ---
 def main():
+    # ... (unchanged Streamlit UI code) ...
     c1, c2 = st.columns([3,1])
     with c2:
         if os.path.exists(LOGO_PATH): st.image(LOGO_PATH, width=120)
@@ -366,7 +387,8 @@ def main():
                 st.warning("Simulation Mode (No EDF)")
                 ch = ["Fp1", "Fp2", "F3", "F4", "C3", "C4", "P3", "P4", "O1", "O2"]
                 df_eeg = pd.DataFrame(np.random.uniform(2,10,(10,4)), columns=[f"{b} (%)" for b in BANDS], index=ch)
-                df_eeg.loc['C4', 'Delta (%)'] = 40.0 # Force a high delta spike
+                # Ensure Alpha is high for Eyes Closed in simulation
+                df_eeg.loc['O1', 'Alpha (%)'] = 15.0
             
             detected_eye = determine_eye_state_smart(df_eeg)
             risks, fdi, tbr, df_eeg, focal_ch = calculate_metrics(df_eeg, phq_score, mmse_total)
@@ -376,7 +398,7 @@ def main():
             maps = {b: generate_topomap(df_eeg, b) for b in BANDS}
             
             st.info(f"**{T_st(get_trans('eye_state', L), L)}:** {detected_eye}")
-            final_eye = st.radio("Confirm Eye State:", ["Eyes Open", "Eyes Closed"], index=0 if detected_eye=="Eyes Open" else 1)
+            final_eye = detected_eye
             
             color = "#ffebee" if alert == "RED" else "#e8f5e9"
             st.markdown(f'<div class="alert-box" style="background:{color}"><h3>{T_st(get_trans("decision", L), L)}</h3><p>{recs[0]}</p></div>', unsafe_allow_html=True)
@@ -384,7 +406,7 @@ def main():
             c1, c2, c3 = st.columns(3)
             c1.metric("Depression", f"{risks['Depression']*100:.0f}%")
             c2.metric("Alzheimer", f"{risks['Alzheimer']*100:.0f}%")
-            # New Metric includes source of anomaly
+            # Display FDI info directly under Tumor Risk
             c3.metric("Tumor Risk", f"{risks['Tumor']*100:.0f}%", f"FDI: {fdi:.2f} @ {focal_ch}") 
             
             st.markdown(f'<div class="report-box"><h4>{T_st(get_trans("narrative", L), L)}</h4><p>{narrative}</p></div>', unsafe_allow_html=True)
