@@ -1,4 +1,4 @@
-# app.py — NeuroEarly Pro v34 (Language Default Fix)
+# app.py — NeuroEarly Pro v34 (Finalized and Corrected)
 import os
 import io
 import json
@@ -429,15 +429,12 @@ def main():
     with c2:
         if os.path.exists(LOGO_PATH): st.image(LOGO_PATH, width=120)
     with c1:
-        # T_st ensures proper BIDI rendering for the main title
         st.markdown(f'<div class="main-header">{get_trans("title", "en")}</div>', unsafe_allow_html=True)
 
     with st.sidebar:
-        # --- Language Fix: Defaulting to English (index=0) ---
         lang_options = ["English", "العربية", "فارسی (Persian)"]
         lang = st.selectbox("Language / اللغة", lang_options, index=0) 
         L = "ar" if lang in ["العربية", "فارسی (Persian)"] else "en"
-        # ---------------------------------------------------
         
         p_name = st.text_input(T_st(get_trans("name", L), L), "John Doe")
         p_gender = st.selectbox(T_st(get_trans("gender", L), L), [get_trans("male", L), get_trans("female", L)])
@@ -462,10 +459,10 @@ def main():
         with c2:
             st.subheader(T_st(get_trans("alz_t", L), L))
             opts_m = get_trans("opt_mmse", L)
-            # MMSE scoring is complex, here simplified: Correct=2 points, Partial=1, Incorrect=0
+            # FIX: Changed index=2 to index=0 for safer loading (Error 1 Fix)
             for i, q in enumerate(get_trans("q_mmse", L)):
-                mmse_score += opts_m.index(st.radio(f"{i+1}. {T_st(q, L)}", opts_m, horizontal=True, key=f"m{i}", index=2)) * 2 # Default to 'Correct' (index 2)
-            mmse_total = min(30, mmse_score + 10) # Simple adjustment to reach 30 max score
+                mmse_score += opts_m.index(st.radio(f"{i+1}. {T_st(q, L)}", opts_m, horizontal=True, key=f"m{i}", index=0)) * 2 
+            mmse_total = min(30, mmse_score + 10) 
             st.metric("MMSE Score", f"{mmse_total}/30")
 
 
@@ -501,7 +498,8 @@ def main():
                 
             # --- Core Logic continues regardless of source data ---
             detected_eye = determine_eye_state_smart(df_eeg)
-            risks, fdi, focal_ch, faa = calculate_metrics(df_eeg, adv_metrics, phq_score, mmse_total)
+            # This line must only accept 4 variables (risks, fdi, focal_ch, faa)
+            risks, fdi, focal_ch, faa = calculate_metrics(df_eeg, adv_metrics, phq_score, mmse_total) 
             
             recs, alert = get_recommendations(risks, blood, L)
             narrative = generate_narrative(risks, blood, faa, adv_metrics.get('Global_Entropy',0), adv_metrics.get('Alpha_Coherence',0), L)
