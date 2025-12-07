@@ -1,4 +1,4 @@
-# app.py — NeuroEarly Pro v34 (Clinical Expert Edition: Detailed Doctor's Report, Fixed Arabic)
+# app.py — NeuroEarly Pro v34 (Language Default Fix)
 import os
 import io
 import json
@@ -31,7 +31,7 @@ st.set_page_config(page_title="NeuroEarly Pro v34", layout="wide", page_icon="�
 
 ASSETS_DIR = "assets"
 LOGO_PATH = os.path.join(ASSETS_DIR, "goldenbird_logo.png")
-FONT_PATH = "Amiri-Regular.ttf"
+FONT_PATH = "Amiri-Regular.ttf" 
 
 BLUE = "#003366"
 RED = "#8B0000"
@@ -44,10 +44,13 @@ st.markdown("""
     .main-header {font-size: 2.2rem; color: #003366; font-weight: bold; margin-bottom: 0px;}
     .report-box {background-color: #e3f2fd; padding: 20px; border-radius: 8px; border-left: 5px solid #003366;}
     .alert-box {background-color: #ffebee; padding: 15px; border-radius: 8px; border-left: 5px solid #d32f2f;}
+    .stTabs [data-baseweb="tab-list"] {gap: 10px;}
+    .stTabs [data-baseweb="tab"] {height: 50px; white-space: pre-wrap; background-color: #f0f2f6; border-radius: 5px 5px 0 0;}
+    .stTabs [aria-selected="true"] {background-color: #003366; color: white;}
 </style>
 """, unsafe_allow_html=True)
 
-# --- 2. LOCALIZATION (Updated Arabic for better flow and new keys) ---
+# --- 2. LOCALIZATION (Finalized for Arabic/Persian BIDI) ---
 TRANS = {
     "en": {
         "title": "NeuroEarly Pro: Clinical Expert Edition", "subtitle": "Advanced Biomarkers: Entropy, Connectivity, FAA",
@@ -98,7 +101,7 @@ TRANS = {
 def T_st(text, lang): return get_display(arabic_reshaper.reshape(text)) if lang == 'ar' else text
 def get_trans(key, lang): return TRANS[lang].get(key, key)
 
-# --- 3. SIGNAL PROCESSING ---
+# --- 3. SIGNAL PROCESSING (Uses MNE to handle real EDF data) ---
 def calculate_advanced_metrics(psds, freqs, ch_names):
     metrics = {}
     
@@ -121,11 +124,48 @@ def calculate_advanced_metrics(psds, freqs, ch_names):
     return metrics
 
 def process_real_edf(uploaded_file):
-    # This is a placeholder for real EDF processing.
-    # The simulation mode below handles the core logic for this request.
-    pass 
+    """Processes real EDF files uploaded by the user."""
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".edf") as tmp:
+        tmp.write(uploaded_file.getvalue())
+        tmp_path = tmp.name
 
-# --- 4. CLINICAL LOGIC (Enhanced Narrative) ---
+    try:
+        raw = mne.io.read_raw_edf(tmp_path, preload=True, verbose=False)
+        
+        STANDARD_CHANNELS = ['Fp1', 'Fp2', 'F7', 'F3', 'Fz', 'F4', 'F8', 'T3', 'C3', 'Cz', 'C4', 'T4', 'T5', 'P3', 'Pz', 'P4', 'T6', 'O1', 'O2']
+        eeg_channels = [ch for ch in raw.ch_names if ch.upper() in [s.upper() for s in STANDARD_CHANNELS]]
+        raw.pick_channels(eeg_channels, ordered=True)
+        
+        sf = raw.info['sfreq']
+        if sf > 100: raw.notch_filter(np.arange(50, sf/2, 50), verbose=False)
+        raw.filter(1.0, 45.0, verbose=False)
+        
+        data = raw.get_data()
+        ch_names = raw.ch_names
+        
+        psds, freqs = mne.time_frequency.psd_array_welch(data, sf, fmin=1.0, fmax=45.0, n_fft=int(2*sf), verbose=False)
+        
+        adv_metrics = calculate_advanced_metrics(psds, freqs, ch_names)
+        
+        df_rows = []
+        for i, ch in enumerate(ch_names):
+            total_power = np.sum(psds[i, :])
+            row = {}
+            for band, (fmin, fmax) in BANDS.items():
+                idx = np.logical_and(freqs >= fmin, freqs <= fmax)
+                val = np.sum(psds[i, idx])
+                row[f"{band} (%)"] = (val / total_power) * 100 if total_power > 0 else 0
+            df_rows.append(row)
+            
+        df_eeg = pd.DataFrame(df_rows, index=ch_names)
+        os.remove(tmp_path)
+        return df_eeg, adv_metrics
+    except Exception as e:
+        if os.path.exists(tmp_path): os.remove(tmp_path)
+        return None, str(e)
+
+
+# --- 4. CLINICAL LOGIC ---
 def determine_eye_state_smart(df_bands):
     occ_channels = [ch for ch in df_bands.index if any(x in ch.upper() for x in ['O1','O2','P3','P4'])]
     if occ_channels and 'Alpha (%)' in df_bands.columns:
@@ -199,17 +239,14 @@ def generate_narrative(risks, blood, faa, entropy_val, coh_val, lang):
     
     # 2. ALZHEIMER/COGNITIVE
     if risks['Alzheimer'] > 0.6:
-        # Parsi: نشانه‌های کاهش پیچیدگی عصبی و قطع اتصال شبکه‌ها دیده می‌شود.
         n += T_st(f"🧠 المؤشرات الإدراكية: انخفاض في الإنتروبيا الطيفية ({entropy_val:.2f}، مما يشير إلى نقص التعقيد العصبي) وضعف في ترابط ألفا ({coh_val:.2f}، مما يدل على قطع اتصال الشبكات) يدعم احتمالية الضعف الإدراكي المبكر (MCI/AD). ", L)
     
     # 3. DEPRESSION
     if risks['Depression'] > 0.6:
-        # Parsi: عدم تقارن آلفای پیشانی (FAA) با ریسک افسردگی همخوانی دارد.
         n += T_st(f"😔 مؤشرات الاكتئاب: عدم تناظر ألفا الجبهي (FAA: {faa:.2f}) يشير إلى هيمنة النشاط في النصف الأيمن المرتبط بالانسحاب العاطفي والاكتئاب. ", L)
         
     # 4. TUMOR
     if risks['Tumor'] > 0.65:
-        # Parsi: خطر آفت کانونی (ضایعه) نیازمند تصویربرداری فوری است.
         n += T_st("⚠️ خطر الآفة البؤرية: نشاط دلتا بؤري حرج يتطلب تصوير فوري (MRI/CT). ", L)
         
     if n == "": n = T_st("✅ المؤشرات الحيوية المتقدمة ضمن الحدود الطبيعية. يمكن المضي قدماً في البروتوكول القياسي.", L)
@@ -218,13 +255,18 @@ def generate_narrative(risks, blood, faa, entropy_val, coh_val, lang):
 # --- 5. VISUALS ---
 def generate_shap(df, adv_metrics, faa):
     try:
+        # Normalize/Scale metrics for a good visual comparison
         feats = {
-            "Frontal Theta": df['Theta (%)'].mean(), 
-            "Occipital Alpha": df['Alpha (%)'].mean(),
-            "Global Entropy": adv_metrics.get('Global_Entropy', 0)*10, 
-            "Alpha Connectivity": adv_metrics.get('Alpha_Coherence', 0)*10,
-            "Frontal Alpha Asym": abs(faa)*5
+            "Frontal Theta": df['Theta (%)'].mean() * 0.5, 
+            "Occipital Alpha": df['Alpha (%)'].mean() * 0.3,
+            "Global Entropy": adv_metrics.get('Global_Entropy', 0)*3.0, 
+            "Alpha Connectivity": adv_metrics.get('Alpha_Coherence', 0)*3.0,
+            "Frontal Alpha Asym": abs(faa)*2.0
         }
+        
+        # Ensure values are non-negative for SHAP plot proxy
+        feats = {k: max(0.1, v) for k, v in feats.items()}
+        
         fig, ax = plt.subplots(figsize=(7,3.5))
         ax.barh(list(feats.keys()), list(feats.values()), color=BLUE)
         ax.set_title("Advanced SHAP Analysis (Feature Importance)")
@@ -235,8 +277,15 @@ def generate_shap(df, adv_metrics, faa):
 
 def generate_topomap(df, band):
     if f'{band} (%)' not in df.columns: return None
-    # Simplified Topomap: just for visualization purpose in Streamlit demo
-    vals = df[f'{band} (%)'].values
+    
+    # Use only channels available in the data frame index
+    available_channels = [ch for ch in ['Fp1', 'Fp2', 'F7', 'F3', 'Fz', 'F4', 'F8', 'T3', 'C3', 'Cz', 'C4', 'T4', 'T5', 'P3', 'Pz', 'P4', 'T6', 'O1', 'O2'] if ch in df.index]
+    if not available_channels: return None
+    
+    vals = df.loc[available_channels, f'{band} (%)'].values
+    
+    # A quick way to simulate a Topomap for visualization purposes.
+    # In a real clinical app, MNE's plot_topomap function would be used with channel positions.
     grid_size = int(np.ceil(np.sqrt(len(vals))))
     if grid_size*grid_size < len(vals): grid_size += 1
     padded = np.zeros(grid_size*grid_size)
@@ -245,16 +294,18 @@ def generate_topomap(df, band):
     fig, ax = plt.subplots(figsize=(3,3))
     ax.imshow(grid, cmap='jet', interpolation='bicubic')
     ax.axis('off')
-    ax.set_title(band) # Title added to Streamlit plot for clarity
+    ax.set_title(band, fontsize=8) 
     buf = io.BytesIO(); plt.savefig(buf, format='png', transparent=True); plt.close(fig); buf.seek(0)
     return buf.getvalue()
+
 
 def scan_blood_work(text):
     warnings = []
     text = text.lower()
-    checks = {"Vitamin D": ["vit d", "low d"], "Thyroid": ["tsh", "thyroid"], "Anemia": ["iron", "anemia"]}
+    checks = {"Vitamin D": ["vit d", "low d", "25-oh"], "Thyroid": ["tsh", "thyroid", "t4"], "Anemia": ["iron", "anemia", "ferritin", "hb"]}
     for k, v in checks.items():
-        if any(x in text for x in v) and ("low" in text or "deficien" in text or "niedrig" in text): warnings.append(k)
+        # Simple detection: check for key terms AND deficiency indicators
+        if any(x in text for x in v) and ("low" in text or "deficien" in text or "niedrig" in text or "<" in text): warnings.append(k)
     return warnings
 
 def extract_text_from_pdf(f):
@@ -267,7 +318,6 @@ def extract_text_from_pdf(f):
 def create_pdf(data, lang):
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, rightMargin=50, leftMargin=50)
-    styles = getSampleStyleSheet()
     
     try: 
         pdfmetrics.registerFont(TTFont('Amiri', FONT_PATH))
@@ -275,13 +325,22 @@ def create_pdf(data, lang):
     except: 
         f_name = 'Helvetica' # Fallback to standard font
         
-    def T(x): return get_display(arabic_reshaper.reshape(str(x))) if lang == 'ar' else str(x)
+    def T(x): return get_display(arabic_reshaper.reshape(str(x))) if lang == 'ar' or lang == 'fa' else str(x)
+    
+    # Define PDF Paragraph Styles using the font
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name='Title', fontName=f_name, fontSize=18, textColor=colors.HexColor(BLUE), alignment=1))
+    styles.add(ParagraphStyle(name='Heading2', fontName=f_name, fontSize=14, textColor=colors.HexColor(BLUE)))
+    styles.add(ParagraphStyle(name='Heading3', fontName=f_name, fontSize=12, textColor=colors.HexColor(BLUE)))
+    styles.add(ParagraphStyle(name='Body', fontName=f_name, leading=16))
+    styles.add(ParagraphStyle(name='Alert', fontName=f_name, textColor=colors.red, leading=16))
+    styles.add(ParagraphStyle(name='Caption', fontName=f_name, fontSize=10, alignment=1))
     
     story = []
     
     # 1. Header & Patient Info
     if os.path.exists(LOGO_PATH): story.append(RLImage(LOGO_PATH, width=1.5*inch, height=1.5*inch))
-    story.append(Paragraph(T(get_trans('title', lang)), ParagraphStyle('T', fontName=f_name, fontSize=18, textColor=colors.HexColor(BLUE))))
+    story.append(Paragraph(T(get_trans('title', lang)), styles['Title']))
     
     p = data['p']
     info = [
@@ -295,15 +354,15 @@ def create_pdf(data, lang):
     story.append(Spacer(1,10))
     
     # 2. Automated Clinical Narrative (XAI)
-    story.append(Paragraph(T(get_trans('narrative', lang)), ParagraphStyle('H2', fontName=f_name, fontSize=14, textColor=colors.HexColor(BLUE))))
-    story.append(Paragraph(T(data['narrative']), ParagraphStyle('B', fontName=f_name, leading=16)))
+    story.append(Paragraph(T(get_trans('narrative', lang)), styles['Heading2']))
+    story.append(Paragraph(T(data['narrative']), styles['Body']))
     story.append(Spacer(1,10))
     
     # 3. Guidance & Protocol
-    story.append(Paragraph(T(get_trans('doc_guide', lang)), ParagraphStyle('H2', fontName=f_name, fontSize=14, textColor=colors.HexColor(BLUE))))
+    story.append(Paragraph(T(get_trans('doc_guide', lang)), styles['Heading2']))
     for r in data['recs']:
-        c = colors.red if "MRI" in r or "حرج" in r else colors.black
-        story.append(Paragraph(T("• " + r), ParagraphStyle('A', fontName=f_name, textColor=c, leading=16)))
+        c = styles['Alert'] if "MRI" in r or "حرج" in r else styles['Body']
+        story.append(Paragraph(T("• " + r), c))
     story.append(Spacer(1,10))
     
     # 4. Risks & Advanced Metrics
@@ -319,18 +378,18 @@ def create_pdf(data, lang):
     story.append(PageBreak())
     
     # 5. NEW: Doctor's Interpretation of Neuro-Markers
-    story.append(Paragraph(T(get_trans('doc_interp', lang)), ParagraphStyle('H2', fontName=f_name, fontSize=16, textColor=colors.HexColor(RED))))
+    story.append(Paragraph(T(get_trans('doc_interp', lang)), ParagraphStyle('H', fontName=f_name, fontSize=16, textColor=colors.HexColor(RED))))
     story.append(Spacer(1,10))
     
     # SHAP Explanation & Image
-    story.append(Paragraph(T("تحليل SHAP (أهمية الميزة)"), ParagraphStyle('H3', fontName=f_name, fontSize=12, textColor=colors.HexColor(BLUE))))
-    story.append(Paragraph(T(get_trans('shap_exp', lang)), ParagraphStyle('B', fontName=f_name, leading=14)))
+    story.append(Paragraph(T("تحليل SHAP (أهمية الميزة)"), styles['Heading3']))
+    story.append(Paragraph(T(get_trans('shap_exp', lang)), styles['Body']))
     if data['shap']: story.append(RLImage(io.BytesIO(data['shap']), width=6*inch, height=3.5*inch))
     story.append(Spacer(1,15))
     
     # Topomap Explanation & Images with CAPTIONS
-    story.append(Paragraph(T("تفسير الخرائط الطبوغرافية (Topomaps)"), ParagraphStyle('H3', fontName=f_name, fontSize=12, textColor=colors.HexColor(BLUE))))
-    story.append(Paragraph(T(get_trans('map_exp', lang)), ParagraphStyle('B', fontName=f_name, leading=14)))
+    story.append(Paragraph(T("تفسير الخرائط الطبوغرافية (Topomaps)"), styles['Heading3']))
+    story.append(Paragraph(T(get_trans('map_exp', lang)), styles['Body']))
     story.append(Spacer(1,5))
     
     # Topomap Images and Captions (In two rows of a single table)
@@ -339,9 +398,8 @@ def create_pdf(data, lang):
     caption_rows = []
     for band in band_names:
         if data['maps'][band]:
-            # Scale down for fitting 4 maps
             img_rows.append(RLImage(io.BytesIO(data['maps'][band]), width=1.4*inch, height=1.4*inch))
-            caption_rows.append(Paragraph(T(get_trans(band.lower(), lang)), ParagraphStyle('C', fontName=f_name, fontSize=10, alignment=1)))
+            caption_rows.append(Paragraph(T(get_trans(band.lower(), lang)), styles['Caption']))
 
     if img_rows: 
         t_maps = Table([img_rows, caption_rows], colWidths=[1.5*inch]*len(img_rows))
@@ -354,11 +412,11 @@ def create_pdf(data, lang):
     story.append(Spacer(1,15))
     
     # Detailed EEG Data Table (Last element)
-    story.append(Paragraph(T("بيانات القنوات المفصلة"), ParagraphStyle('H2', fontName=f_name)))
+    story.append(Paragraph(T("بيانات القنوات المفصلة"), styles['Heading2']))
     df = data['eeg'].head(15).round(2)
     cols = ['Ch'] + list(df.columns)
     rows = [cols] + [[i] + [str(x) for x in row] for i, row in df.iterrows()]
-    t3 = Table(rows, style=TableStyle([('GRID',(0,0),(-1,-1),0.25,colors.grey), ('FONTSIZE',(0,0),(-1,-1),8)]))
+    t3 = Table(rows, style=TableStyle([('GRID',(0,0),(-1,-1),0.25,colors.grey), ('FONTNAME', (0,0),(-1,-1), f_name), ('FONTSIZE',(0,0),(-1,-1),8)]))
     story.append(t3)
     
     doc.build(story)
@@ -368,12 +426,19 @@ def create_pdf(data, lang):
 # --- 7. MAIN STREAMLIT APPLICATION ---
 def main():
     c1, c2 = st.columns([3,1])
-    # ... (Omitted Streamlit boilerplate for brevity) ...
+    with c2:
+        if os.path.exists(LOGO_PATH): st.image(LOGO_PATH, width=120)
+    with c1:
+        # T_st ensures proper BIDI rendering for the main title
+        st.markdown(f'<div class="main-header">{get_trans("title", "en")}</div>', unsafe_allow_html=True)
 
     with st.sidebar:
-        lang = st.selectbox("Language / اللغة", ["English", "العربية", "فارسی (Persian)"])
-        # Map Persian to Arabic for BiDi support and shared translations
+        # --- Language Fix: Defaulting to English (index=0) ---
+        lang_options = ["English", "العربية", "فارسی (Persian)"]
+        lang = st.selectbox("Language / اللغة", lang_options, index=0) 
         L = "ar" if lang in ["العربية", "فارسی (Persian)"] else "en"
+        # ---------------------------------------------------
+        
         p_name = st.text_input(T_st(get_trans("name", L), L), "John Doe")
         p_gender = st.selectbox(T_st(get_trans("gender", L), L), [get_trans("male", L), get_trans("female", L)])
         p_dob = st.date_input(T_st(get_trans("dob", L), L), value=date(1980,1,1))
@@ -382,43 +447,61 @@ def main():
         lab_file = st.file_uploader(T_st(get_trans("lab_up", L), L), type=["pdf", "txt"])
         lab_text = extract_text_from_pdf(lab_file) if lab_file else ""
         
-    # --- Simplified tabs for this context ---
     tab1, tab2 = st.tabs([T_st(get_trans("tab_assess", L), L), T_st(get_trans("tab_neuro", L), L)])
     
+    # --- Clinical Assessments (PHQ-9 and MMSE) ---
     with tab1:
         c1, c2 = st.columns(2)
-        phq_score = 10; mmse_score = 10 # Default to moderate scores for a demo
-        with c1: st.metric("PHQ-9 (Simulated)", f"{phq_score}/27")
-        with c2: st.metric("MMSE (Simulated)", f"{mmse_score}/30")
-        mmse_total = min(30, mmse_score+10)
+        phq_score = 0; mmse_score = 0
+        with c1:
+            st.subheader(T_st(get_trans("phq_t", L), L))
+            opts = get_trans("opt_phq", L)
+            for i, q in enumerate(get_trans("q_phq", L)):
+                phq_score += opts.index(st.radio(f"{i+1}. {T_st(q, L)}", opts, horizontal=True, key=f"p{i}", index=0))
+            st.metric("PHQ-9 Score", f"{phq_score}/27")
+        with c2:
+            st.subheader(T_st(get_trans("alz_t", L), L))
+            opts_m = get_trans("opt_mmse", L)
+            # MMSE scoring is complex, here simplified: Correct=2 points, Partial=1, Incorrect=0
+            for i, q in enumerate(get_trans("q_mmse", L)):
+                mmse_score += opts_m.index(st.radio(f"{i+1}. {T_st(q, L)}", opts_m, horizontal=True, key=f"m{i}", index=2)) * 2 # Default to 'Correct' (index 2)
+            mmse_total = min(30, mmse_score + 10) # Simple adjustment to reach 30 max score
+            st.metric("MMSE Score", f"{mmse_total}/30")
 
+
+    # --- Advanced Neuro-Analysis ---
     with tab2:
         uploaded_edf = st.file_uploader("Upload EEG (EDF)", type=["edf"])
         if st.button(T_st(get_trans("analyze", L), L), type="primary"):
             
-            # --- Simulation/Placeholder Data for Demonstration ---
-            blood = scan_blood_work(lab_text) if lab_text else ['Vitamin D', 'Thyroid', 'Anemia'] # Default to issues for demo
+            blood = scan_blood_work(lab_text)
+            df_eeg = None
+            adv_metrics = {}
             
-            # Simulated EEG data demonstrating a high Alzheimer/Depression risk pattern
-            st.warning("Simulation Mode: Using a predefined AD/Depression pattern.")
-            ch = ["Fp1", "Fp2", "F3", "F4", "C3", "C4", "P3", "P4", "O1", "O2"]
-            # Increased Theta/Delta, Reduced Alpha in Posterior, FAA
-            data = {
-                'Delta (%)': [5.0, 4.5, 3.0, 4.0, 5.0, 4.0, 6.0, 5.5, 3.0, 2.5],
-                'Theta (%)': [12.0, 11.5, 9.0, 10.0, 10.0, 9.5, 12.0, 11.0, 8.0, 7.5],
-                'Alpha (%)': [6.0, 5.5, 4.0, 8.0, 7.0, 6.5, 5.0, 4.5, 12.0, 11.5], # FAA: F4 > F3 (Right > Left)
-                'Beta (%)': [15.0, 14.5, 13.0, 14.0, 13.0, 12.5, 11.0, 10.5, 15.0, 14.5]
-            }
-            df_eeg = pd.DataFrame(data, index=ch)
-            
-            # Advanced Metrics for AD/Depression risk
-            adv_metrics = {'Global_Entropy': 0.75, 'Alpha_Coherence': 0.45} 
-
-            # --- Core Logic ---
+            if uploaded_edf:
+                # --- REAL DATA PROCESSING ---
+                with st.spinner(T_st("Processing Real EEG Signal...", L)):
+                    df_eeg, result = process_real_edf(uploaded_edf)
+                    if df_eeg is None: 
+                        st.error(T_st("Error processing EDF file:", L) + f" {result}"); 
+                        st.stop()
+                    
+            else:
+                # --- SIMULATION MODE (ONLY if no file is uploaded) ---
+                st.warning(T_st("No EDF uploaded. Running in Simulation Mode (Results are illustrative).", L))
+                ch = ["Fp1", "Fp2", "F3", "F4", "C3", "C4", "P3", "P4", "O1", "O2"]
+                data = {
+                    'Delta (%)': [5.0, 4.5, 3.0, 4.0, 5.0, 4.0, 6.0, 5.5, 3.0, 2.5],
+                    'Theta (%)': [12.0, 11.5, 9.0, 10.0, 10.0, 9.5, 12.0, 11.0, 8.0, 7.5],
+                    'Alpha (%)': [6.0, 5.5, 4.0, 8.0, 7.0, 6.5, 5.0, 4.5, 12.0, 11.5],
+                    'Beta (%)': [15.0, 14.5, 13.0, 14.0, 13.0, 12.5, 11.0, 10.5, 15.0, 14.5]
+                }
+                df_eeg = pd.DataFrame(data, index=ch)
+                adv_metrics = {'Global_Entropy': 0.75, 'Alpha_Coherence': 0.45}
+                
+            # --- Core Logic continues regardless of source data ---
             detected_eye = determine_eye_state_smart(df_eeg)
             risks, fdi, focal_ch, faa = calculate_metrics(df_eeg, adv_metrics, phq_score, mmse_total)
-            risks['Alzheimer'] = 0.85 # Override for demonstration of AD pattern
-            risks['Depression'] = 0.65 # Override for demonstration of Depression pattern
             
             recs, alert = get_recommendations(risks, blood, L)
             narrative = generate_narrative(risks, blood, faa, adv_metrics.get('Global_Entropy',0), adv_metrics.get('Alpha_Coherence',0), L)
@@ -427,34 +510,31 @@ def main():
             
             # --- Streamlit Output ---
             st.info(f"**{T_st(get_trans('eye_state', L), L)}:** {detected_eye}")
-            final_eye = st.radio("Confirm:", [T_st("Eyes Open",L), T_st("Eyes Closed",L)], index=0 if detected_eye=="Eyes Open" else 1)
+            final_eye = st.radio(T_st("Confirm Eye State:", L), [T_st("Eyes Open",L), T_st("Eyes Closed",L)], index=0 if detected_eye=="Eyes Open" else 1)
             
-            color = "#ffebee" if alert == "RED" else "#e8f5e9"
+            color = "#ffebee" if alert == "RED" else ("#fff3e0" if alert == "ORANGE" else "#e8f5e9")
             st.markdown(f'<div class="alert-box" style="background:{color}"><h3>{T_st(get_trans("decision", L), L)}</h3><p>{recs[0]}</p></div>', unsafe_allow_html=True)
             
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric(T_st("ریسک افسردگی", L), f"{risks['Depression']*100:.0f}%")
-            c2.metric(T_st("ریسک آلزایمر", L), f"{risks['Alzheimer']*100:.0f}%")
-            c3.metric(T_st("آنتروپی", L), f"{adv_metrics.get('Global_Entropy',0):.2f}")
-            c4.metric(T_st("اتصال آلفا", L), f"{adv_metrics.get('Alpha_Coherence',0):.2f}")
+            c1.metric(T_st("Depression Risk", L), f"{risks['Depression']*100:.0f}%")
+            c2.metric(T_st("Alzheimer Risk", L), f"{risks['Alzheimer']*100:.0f}%")
+            c3.metric(T_st("Entropy", L), f"{adv_metrics.get('Global_Entropy',0):.2f}")
+            c4.metric(T_st("Alpha Coherence", L), f"{adv_metrics.get('Alpha_Coherence',0):.2f}")
             
             st.markdown(f'<div class="report-box"><h4>{T_st(get_trans("narrative", L), L)}</h4><p>{narrative}</p></div>', unsafe_allow_html=True)
             st.dataframe(df_eeg.style.background_gradient(cmap='Blues'), height=200)
             if shap_img: st.image(shap_img)
-            st.image(list(maps.values()), width=120, caption=list(BANDS.keys()))
+            st.image(list(maps.values()), width=120, caption=[T_st(b,L) for b in BANDS.keys()])
             
+            # --- PDF Data Prep and Download ---
             pdf_data = {
                 "title": get_trans("title", L),
                 "p": {"name": p_name, "gender": p_gender, "dob": str(p_dob), "id": p_id, "labs": str(blood), "eye": final_eye},
                 "risks": risks, "recs": recs, "eeg": df_eeg, "shap": shap_img, "maps": maps, "narrative": narrative, 
                 "focal_ch": focal_ch, "adv": adv_metrics, "faa": faa
             }
-            # The download button is the final output
             st.download_button(T_st(get_trans("download", L), L), create_pdf(pdf_data, L), "Research_Grade_Report.pdf", "application/pdf")
 
 if __name__ == "__main__":
-    # Ensure assets directory exists for logo/font
     if not os.path.exists(ASSETS_DIR): os.makedirs(ASSETS_DIR)
-    # Placeholder: Ensure Amiri-Regular.ttf is available in the environment for Arabic support
-    # You may need to upload or ensure this font file is accessible.
     main()
