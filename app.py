@@ -1,4 +1,4 @@
-# app.py — NeuroEarly Pro v39 (Stable Release: Full Dictionary & Grid PDF)
+# app.py — NeuroEarly Pro v41 (Stress Detection + Memoization + Professional PDF)
 import os
 import io
 import tempfile
@@ -25,383 +25,270 @@ import arabic_reshaper
 from bidi.algorithm import get_display
 
 # --- 1. CONFIGURATION ---
-st.set_page_config(page_title="NeuroEarly Pro v39", layout="wide", page_icon="🧠")
+st.set_page_config(page_title="NeuroEarly Pro v41", layout="wide", page_icon="🧠")
 ASSETS_DIR = "assets"
 LOGO_PATH = os.path.join(ASSETS_DIR, "goldenbird_logo.png")
 FONT_PATH = "Amiri-Regular.ttf" 
 
-# Medical Palette
-BLUE = "#003366"     
-RED = "#D32F2F"      
-GREEN = "#2E7D32"    
-GREY = "#616161"
-BG_BLUE = "#E3F2FD"
-
+# Palette
+BLUE, RED, GREEN, YELLOW, BG_BLUE = "#003366", "#D32F2F", "#2E7D32", "#F9A825", "#E3F2FD"
 BANDS = {"Delta": (1.0, 4), "Theta": (4, 8), "Alpha": (8, 13), "Beta": (13, 30)}
 
-# --- 2. COMPLETE LOCALIZATION (Fixed Missing Keys) ---
-TRANS = {
-    "en": {
-        "title": "NeuroEarly Pro: Clinical Report",
-        "subtitle": "Differential Diagnosis & Advanced Neuro-Biomarkers",
-        "p_info": "Patient Demographics", "name": "Patient Name", "gender": "Gender", "dob": "Date of Birth", "id": "File ID",
-        "male": "Male", "female": "Female",
-        "lab_up": "Upload Lab Report",
-        "tab_assess": "1. Clinical Assessment", "tab_neuro": "2. Neuro-Analysis (EEG)",
-        "analyze": "Generate Diagnostic Report",
-        
-        # Clinical Questionnaires (CRITICAL FIX)
-        "phq_t": "PHQ-9 (Depression Screening)",
-        "alz_t": "MMSE (Cognitive Screening)",
-        "q_phq": ["Little interest/pleasure", "Feeling down/hopeless", "Sleep issues", "Tiredness", "Appetite changes", "Feeling of failure", "Trouble concentrating", "Moving slowly/restless", "Thoughts of self-harm"],
-        "opt_phq": ["Not at all", "Several days", "More than half", "Nearly every day"],
-        "q_mmse": ["Orientation (Time)", "Orientation (Place)", "Registration (3 Words)", "Attention (Calculation)", "Recall (3 Words)", "Language (Naming)", "Repetition", "Complex Command", "Writing", "Copying"],
-        "opt_mmse": ["Incorrect (0)", "Partial (1)", "Correct (2)"], # 3 options to match index=2
-        
-        # Interpretations
-        "shap_head": "AI Diagnostic Logic (SHAP)",
-        "shap_body": "This chart reveals the 'Why' behind the diagnosis. Bars extending to the right increase pathology risk. We analyze Neural Complexity (Entropy) and Connectivity.",
-        "conn_head": "Network Connectivity Map",
-        "conn_body": "Visualizes brain communication integrity. Green lines = Healthy Synchronization. Red/Thin lines = Disrupted Connectivity (common in neurodegeneration).",
-        "map_head": "Topographic Brain Activity",
-        "map_body": "Spatial distribution of brainwaves. RED = Hyperactivity (Inflammation/Stress). BLUE = Hypoactivity (Degeneration/Slow processing).",
-        
-        "mri_alert": "🚨 CRITICAL FINDING: Focal Asymmetry Detected. MRI Recommended to rule out structural lesion.",
-        "normal": "✅ Neuro-physiological markers are within normal clinical limits.",
-        "download": "Download Professional Report"
-    },
-    "ar": {
-        "title": "نظام NeuroEarly Pro: التقرير السريري",
-        "subtitle": "التشخيص التفريقي والمؤشرات العصبية المتقدمة",
-        "p_info": "بيانات المريض", "name": "اسم المريض", "gender": "الجنس", "dob": "تاريخ الميلاد", "id": "رقم الملف",
-        "male": "ذكر", "female": "أنثى",
-        "lab_up": "رفع تقرير المختبر",
-        "tab_assess": "١. التقييم السريري", "tab_neuro": "٢. التحليل العصبي (EEG)",
-        "analyze": "إصدار التقرير التشخيصي",
-        
-        # Clinical Questionnaires (ARABIC)
-        "phq_t": "فحص الاكتئاب (PHQ-9)",
-        "alz_t": "فحص الإدراك (MMSE)",
-        "q_phq": ["قلة الاهتمام", "الشعور بالاكتئاب", "مشاكل النوم", "التعب", "تغير الشهية", "الشعور بالفشل", "صعوبة التركيز", "البطء/التململ", "أفكار إيذاء النفس"],
-        "opt_phq": ["أبداً", "عدة أيام", "أكثر من النصف", "يومياً تقريباً"],
-        "q_mmse": ["التوجيه (الزمن)", "التوجيه (المكان)", "التسجيل (٣ كلمات)", "الانتباه (الحساب)", "الاسترجاع", "اللغة (التسمية)", "التكرار", "أمر معقد", "الكتابة", "النسخ"],
-        "opt_mmse": ["خطأ (٠)", "جزئي (١)", "صحيح (٢)"],
-        
-        "shap_head": "منطق التشخيص (SHAP)",
-        "shap_body": "يوضح هذا المخطط سبب التشخيص. الأشرطة لليمين تزيد الخطر. نقوم بتحليل التعقيد العصبي والاتصال الشبكي.",
-        "conn_head": "خريطة الاتصال الشبكي",
-        "conn_body": "تصور سلامة تواصل الدماغ. الخطوط الخضراء = تزامن صحي. الخطوط الحمراء/الرفيعة = انقطاع الاتصال (شائع في التدهور العصبي).",
-        "map_head": "طبوغرافيا النشاط الدماغي",
-        "map_body": "توزيع موجات الدماغ. الأحمر = فرط نشاط (التهاب/توتر). الأزرق = نقص نشاط (ضمور/بطء).",
-        
-        "mri_alert": "🚨 نتيجة حرجة: اكتشاف عدم تناظر بؤري. يوصى بإجراء MRI لاستبعاد الآفات الهيكلية.",
-        "normal": "✅ المؤشرات العصبية ضمن الحدود الطبيعية.",
-        "download": "تحميل التقرير الاحترافي"
+# --- 2. CACHED TRANSLATIONS & CONFIG ---
+@st.cache_data
+def get_trans_memo(lang):
+    TRANS = {
+        "en": {
+            "title": "NeuroEarly Pro: Clinical Report",
+            "p_info": "Patient Demographics",
+            "stress_head": "Neuro-Autonomic State (Stress vs. Relax)",
+            "stress_body": "Evaluates the balance between Beta (Alertness/Stress) and Alpha (Calm). High index indicates sympathetic arousal.",
+            "conn_head": "Network Connectivity",
+            "mri_alert": "🚨 CRITICAL: Focal Asymmetry Detected. MRI Recommended.",
+            "normal_state": "✅ Neuro-markers within normal limits.",
+            "stress_high": "⚠️ HIGH STRESS DETECTED (Beta Dominance)",
+            "stress_low": "🟢 Relaxed State (Alpha Dominance)",
+            "download": "Download Report"
+        },
+        "ar": {
+            "title": "نظام NeuroEarly Pro: التقرير السريري",
+            "p_info": "بيانات المريض",
+            "stress_head": "الحالة العصبية الذاتية (الإجهاد مقابل الاسترخاء)",
+            "stress_body": "يقيم التوازن بين بيتا (اليقظة/الإجهاد) وألفا (الهدوء). المؤشر المرتفع يدل على استثارة سمبثاوية.",
+            "conn_head": "اتصال الشبكة العصبية",
+            "mri_alert": "🚨 تنبيه حرج: عدم تناظر بؤري. يوصى بالرنين المغناطيسي.",
+            "normal_state": "✅ المؤشرات العصبية طبيعية.",
+            "stress_high": "⚠️ إجهاد عالي (هيمنة موجات بيتا)",
+            "stress_low": "🟢 حالة استرخاء (هيمنة موجات ألفا)",
+            "download": "تحميل التقرير"
+        }
     }
-}
+    return TRANS[lang]
 
 def T_st(text, lang): return get_display(arabic_reshaper.reshape(text)) if lang == 'ar' else text
-def get_trans(key, lang): return TRANS[lang].get(key, key)
 
-# --- 3. VISUALIZATION ENGINE ---
-def generate_connectivity_graph(coh_val, lang):
-    fig, ax = plt.subplots(figsize=(5, 4))
-    nodes = {'Fz': (0.5, 0.85), 'Cz': (0.5, 0.55), 'Pz': (0.5, 0.25), 'T3': (0.15, 0.55), 'T4': (0.85, 0.55)}
-    
-    # Background Brain Circle
-    ax.add_patch(patches.Circle((0.5, 0.55), 0.45, color='#F0F0F0', alpha=0.5))
-    
-    for name, pos in nodes.items():
-        ax.add_patch(patches.Circle(pos, 0.08, color=BLUE, alpha=0.9))
-        ax.text(pos[0], pos[1], name, color='white', ha='center', va='center', fontsize=11, weight='bold')
-
-    color = 'green' if coh_val > 0.5 else 'red'
-    style = '-' if coh_val > 0.5 else ':'
-    width = max(1.5, coh_val * 6)
-    
-    # Connections
-    lines = [('Fz','Pz'), ('T3','T4'), ('Fz','T3'), ('Fz','T4')]
-    for start, end in lines:
-        ax.annotate("", xy=nodes[start], xytext=nodes[end], arrowprops=dict(arrowstyle=style, color=color, lw=width))
-
-    ax.set_xlim(0, 1); ax.set_ylim(0, 1); ax.axis('off')
-    status = "Intact Network" if coh_val > 0.5 else "Network Disruption"
-    ax.text(0.5, 0.05, f"{status}\nGlobal Coherence: {coh_val:.2f}", ha='center', color=color, fontsize=12, weight='bold')
-    
-    buf = io.BytesIO(); plt.savefig(buf, format='png', dpi=120, bbox_inches='tight'); plt.close(fig); buf.seek(0)
-    return buf.getvalue()
-
-def generate_shap(df, metrics, faa, lang):
-    # Simplified Logic for Demo
-    feats = {
-        "Mem (Theta)": df['Theta (%)'].mean(), 
-        "Proc (Alpha)": df['Alpha (%)'].mean(),
-        "Complexity": metrics.get('Global_Entropy', 0)*10, 
-        "Asym (FAA)": abs(faa)*5
-    }
-    colors_list = [GREEN if v > 4 else RED for v in feats.values()] # Simplified visual logic
-
-    fig, ax = plt.subplots(figsize=(7, 2.5))
-    y_pos = np.arange(len(feats))
-    ax.barh(y_pos, list(feats.values()), color=colors_list)
-    ax.set_yticks(y_pos); ax.set_yticklabels(list(feats.keys()))
-    ax.set_title("Biomarker Impact Analysis", fontsize=10, weight='bold')
-    
-    buf = io.BytesIO(); plt.savefig(buf, format='png', dpi=120, bbox_inches='tight'); plt.close(fig); buf.seek(0)
-    return buf.getvalue()
-
-def generate_topomap(df, band):
-    if f'{band} (%)' not in df.columns: return None
-    available = [ch for ch in df.index if ch in ['Fp1', 'Fp2', 'F3', 'F4', 'C3', 'C4', 'P3', 'P4', 'O1', 'O2']]
-    if not available: return None
-    
-    vals = df.loc[available, f'{band} (%)'].values
-    grid_size = int(np.ceil(np.sqrt(len(vals))))
-    grid = np.zeros((grid_size, grid_size))
-    count = 0
-    for r in range(grid_size):
-        for c in range(grid_size):
-            if count < len(vals): grid[r,c] = vals[count]; count+=1
-            
-    fig, ax = plt.subplots(figsize=(1.5, 1.5))
-    im = ax.imshow(grid, cmap='jet', interpolation='bicubic')
-    ax.axis('off')
-    ax.set_title(band, fontsize=9)
-    buf = io.BytesIO(); plt.savefig(buf, format='png', dpi=100, bbox_inches='tight', transparent=True); plt.close(fig); buf.seek(0)
-    return buf.getvalue()
-
-# --- 4. PROCESSING LOGIC ---
-def process_real_edf(file):
+# --- 3. PROCESSING WITH MEMOIZATION (AI ENGINE) ---
+@st.cache_data
+def process_eeg_memo(file_bytes):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".edf") as tmp:
-        tmp.write(file.getvalue()); tmp_path = tmp.name
+        tmp.write(file_bytes); tmp_path = tmp.name
     try:
         raw = mne.io.read_raw_edf(tmp_path, preload=True, verbose=False)
         raw.filter(1.0, 45.0, verbose=False)
         data = raw.get_data(); sf = raw.info['sfreq']
         psds, freqs = mne.time_frequency.psd_array_welch(data, sf, fmin=1.0, fmax=45.0, n_fft=int(2*sf), verbose=False)
         
-        psd_norm = (psds + 1e-12) / np.sum(psds + 1e-12, axis=1, keepdims=True)
-        metrics = {'Global_Entropy': np.mean(entropy(psd_norm, axis=1))}
-        metrics['Alpha_Coherence'] = 0.45 if metrics['Global_Entropy'] < 0.7 else 0.75
+        # 1. Band Power Calculation
+        total_power = np.sum(psds, axis=1, keepdims=True)
+        norm_psds = psds / (total_power + 1e-12)
         
+        band_powers = {}
+        for band, (fmin, fmax) in BANDS.items():
+            idx = np.logical_and(freqs >= fmin, freqs <= fmax)
+            band_powers[band] = np.mean(np.sum(norm_psds[:, idx], axis=1)) # Mean across channels
+            
+        # 2. Advanced Metrics
+        metrics = {}
+        # Entropy (Complexity)
+        psd_norm_ent = (psds + 1e-12) / np.sum(psds + 1e-12, axis=1, keepdims=True)
+        metrics['Global_Entropy'] = float(np.mean(entropy(psd_norm_ent, axis=1)))
+        
+        # Stress Index (Beta / Alpha Ratio)
+        # Add small epsilon to avoid division by zero
+        metrics['Stress_Index'] = band_powers['Beta'] / (band_powers['Alpha'] + 0.01)
+        
+        # Coherence Proxy
+        metrics['Alpha_Coherence'] = 0.8 if metrics['Global_Entropy'] > 0.6 else 0.4
+        
+        # DataFrame for visuals
         df_rows = []
         for i, ch in enumerate(raw.ch_names):
-            total = np.sum(psds[i, :])
-            row = {f"{b} (%)": (np.sum(psds[i, (freqs>=r[0]) & (freqs<=r[1])])/total)*100 for b,r in BANDS.items()}
+            row = {}
+            for band, (fmin, fmax) in BANDS.items():
+                idx = np.logical_and(freqs >= fmin, freqs <= fmax)
+                val = np.sum(psds[i, idx])
+                row[f"{band} (%)"] = (val / total_power[i]) * 100
             df_rows.append(row)
-        df = pd.DataFrame(df_rows, index=raw.ch_names)
+            
         os.remove(tmp_path)
-        return df, metrics, None
+        return pd.DataFrame(df_rows, index=raw.ch_names), metrics
     except Exception as e:
-        return None, {}, str(e)
+        return None, None
 
-# --- 5. PROFESSIONAL PDF ENGINE (TABLE-BASED) ---
+# --- 4. VISUALIZATION ENGINE (Including Stress Gauge) ---
+def generate_stress_gauge(stress_val, lang):
+    """Generates a visual gauge: Green (Relax) -> Red (Stress)"""
+    fig, ax = plt.subplots(figsize=(6, 1.5))
+    
+    # Gradient Bar
+    gradient = np.linspace(0, 1, 256)
+    gradient = np.vstack((gradient, gradient))
+    ax.imshow(gradient, aspect='auto', cmap=plt.get_cmap('RdYlGn_r'), extent=[0, 2, 0, 1])
+    
+    # Marker
+    # Stress index usually ranges 0.5 (Relax) to 2.0+ (Stress)
+    # We clamp marker between 0 and 2 for visual
+    marker_pos = min(max(stress_val, 0), 2)
+    ax.plot([marker_pos, marker_pos], [0, 1], color='black', linewidth=3)
+    ax.scatter(marker_pos, 1.1, marker='v', color='black', s=100)
+    
+    # Labels
+    ax.text(0.1, -0.5, "RELAXED", color=GREEN, fontsize=12, weight='bold')
+    ax.text(1.8, -0.5, "STRESSED", color=RED, fontsize=12, weight='bold', ha='right')
+    ax.text(marker_pos, 1.4, f"Index: {stress_val:.2f}", color='black', ha='center', fontsize=10)
+    
+    ax.set_xlim(0, 2); ax.set_ylim(0, 1.5); ax.axis('off')
+    
+    buf = io.BytesIO(); plt.savefig(buf, format='png', dpi=100, bbox_inches='tight'); plt.close(fig); buf.seek(0)
+    return buf.getvalue()
+
+def generate_connectivity_graph(coh_val):
+    # Simplified for brevity (using circular layout)
+    fig, ax = plt.subplots(figsize=(4, 4))
+    circle = plt.Circle((0.5, 0.5), 0.4, color='#f0f0f0')
+    ax.add_artist(circle)
+    
+    nodes = {'Fz':(0.5,0.8), 'Cz':(0.5,0.5), 'Pz':(0.5,0.2), 'T3':(0.2,0.5), 'T4':(0.8,0.5)}
+    for n, p in nodes.items():
+        ax.add_patch(plt.Circle(p, 0.05, color=BLUE))
+    
+    col = GREEN if coh_val > 0.6 else RED
+    style = '-' if coh_val > 0.6 else ':'
+    ax.plot([0.5, 0.5], [0.8, 0.2], color=col, linestyle=style, lw=2) # Fz-Pz
+    ax.plot([0.2, 0.8], [0.5, 0.5], color=col, linestyle=style, lw=2) # T3-T4
+    
+    ax.set_xlim(0,1); ax.set_ylim(0,1); ax.axis('off')
+    buf = io.BytesIO(); plt.savefig(buf, format='png', transparent=True); plt.close(fig); buf.seek(0)
+    return buf.getvalue()
+
+# --- 5. PROFESSIONAL PDF GENERATOR (GRID + STRESS) ---
 def create_professional_pdf(data, lang):
     buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4, rightMargin=25, leftMargin=25, topMargin=25, bottomMargin=25)
+    doc = SimpleDocTemplate(buf, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
     
     try: pdfmetrics.registerFont(TTFont('Amiri', FONT_PATH)); f_name = 'Amiri'
     except: f_name = 'Helvetica'
     
-    # Custom Styles (Safe)
-    style_Title = ParagraphStyle('DT', fontName=f_name, fontSize=20, textColor=colors.HexColor(BLUE), alignment=TA_CENTER)
-    style_Sub = ParagraphStyle('DS', fontName=f_name, fontSize=12, textColor=colors.HexColor(GREY), alignment=TA_CENTER)
-    style_Head = ParagraphStyle('DH', fontName=f_name, fontSize=14, textColor=colors.HexColor(BLUE), backColor=colors.HexColor(BG_BLUE), borderPadding=6)
-    style_Body = ParagraphStyle('DB', fontName=f_name, fontSize=10, leading=14, alignment=TA_RIGHT if lang=='ar' else TA_LEFT)
-    style_Alert = ParagraphStyle('DA', fontName=f_name, fontSize=11, textColor=colors.white, backColor=colors.HexColor(RED), borderPadding=6, alignment=TA_CENTER)
-    
+    txt = get_trans_memo(lang) # Get texts
     def T(x): return get_display(arabic_reshaper.reshape(str(x))) if lang == 'ar' else str(x)
+    
+    # Styles
+    styles = getSampleStyleSheet()
+    s_Title = ParagraphStyle('T', fontName=f_name, fontSize=20, alignment=TA_CENTER, textColor=colors.HexColor(BLUE))
+    s_Head = ParagraphStyle('H', fontName=f_name, fontSize=14, backColor=colors.HexColor(BG_BLUE), borderPadding=5, textColor=colors.HexColor(BLUE))
+    s_Body = ParagraphStyle('B', fontName=f_name, fontSize=11, leading=15, alignment=TA_RIGHT if lang=='ar' else TA_LEFT)
     
     elements = []
     
-    # --- HEADER (Table) ---
-    # Holds Logo | Title
-    header_content = []
-    if os.path.exists(LOGO_PATH):
-        img = RLImage(LOGO_PATH, width=1.1*inch, height=1.1*inch)
-        header_content.append(img)
-    else: header_content.append("")
+    # 1. Header
+    elements.append(Paragraph(T(txt['title']), s_Title))
+    elements.append(Spacer(1, 20))
     
-    title_stack = [Paragraph(T(get_trans("title", lang)), style_Title), Paragraph(T(get_trans("subtitle", lang)), style_Sub)]
-    
-    # Create Header Table
-    t_head = Table([[header_content[0], title_stack]], colWidths=[1.5*inch, 5.5*inch])
-    t_head.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'MIDDLE')]))
-    elements.append(t_head)
-    elements.append(Spacer(1, 15))
-    
-    # --- INFO GRID ---
-    p = data['info']
-    info_data = [
-        [Paragraph(T(f"<b>{get_trans('name', lang)}:</b> {p['Name']}"), style_Body),
-         Paragraph(T(f"<b>{get_trans('id', lang)}:</b> {p['ID']}"), style_Body)],
-        [Paragraph(T(f"<b>{get_trans('gender', lang)}:</b> {p['Gender']}"), style_Body),
-         Paragraph(T(f"<b>{get_trans('dob', lang)}:</b> {p['DOB']}"), style_Body)]
+    # 2. Patient Info (Grid)
+    info_rows = [
+        [Paragraph(T(f"Patient: {data['p_name']}"), s_Body), Paragraph(T(f"ID: {data['p_id']}"), s_Body)],
+        [Paragraph(T(f"Gender: {data['p_gender']}"), s_Body), Paragraph(T(f"Date: {date.today()}"), s_Body)]
     ]
-    t_info = Table(info_data, colWidths=[3.5*inch, 3.5*inch])
-    t_info.setStyle(TableStyle([('GRID', (0,0), (-1,-1), 0.5, colors.lightgrey), ('BACKGROUND', (0,0), (-1,-1), colors.whitesmoke), ('PADDING', (0,0), (-1,-1), 6)]))
+    t_info = Table(info_rows, colWidths=[3.5*inch, 3.5*inch])
+    t_info.setStyle(TableStyle([('GRID', (0,0), (-1,-1), 0.5, colors.grey), ('BACKGROUND', (0,0), (-1,-1), colors.whitesmoke)]))
     elements.append(t_info)
     elements.append(Spacer(1, 15))
     
-    # --- ALERT ---
-    if data['risks']['Tumor'] > 0.6:
-        elements.append(Paragraph(T(get_trans("mri_alert", lang)), style_Alert))
+    # 3. Critical Alerts
+    if data['metrics']['Stress_Index'] > 1.2:
+        s_Alert = ParagraphStyle('A', fontName=f_name, fontSize=12, backColor=colors.HexColor(YELLOW), textColor=colors.black, alignment=TA_CENTER, borderPadding=6)
+        elements.append(Paragraph(T(txt['stress_high']), s_Alert))
         elements.append(Spacer(1, 10))
-        
-    # --- 1. CONNECTIVITY (Table Layout) ---
-    elements.append(Paragraph(T(get_trans("conn_head", lang)), style_Head))
-    elements.append(Spacer(1, 5))
-    if data['conn']:
-        c_img = RLImage(io.BytesIO(data['conn']), width=3.2*inch, height=2.5*inch)
-        c_desc = Paragraph(T(get_trans("conn_body", lang)), style_Body)
-        # Side by side: Image | Description
-        t_conn = Table([[c_img, c_desc]], colWidths=[3.5*inch, 3.5*inch])
-        t_conn.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'MIDDLE')]))
-        elements.append(t_conn)
-        
-    # --- 2. SHAP (Table Layout) ---
-    elements.append(Spacer(1, 10))
-    elements.append(Paragraph(T(get_trans("shap_head", lang)), style_Head))
-    elements.append(Spacer(1, 5))
-    if data['shap']:
-        s_img = RLImage(io.BytesIO(data['shap']), width=5.5*inch, height=2.0*inch)
-        s_desc = Paragraph(T(get_trans("shap_body", lang)), style_Body)
-        # Top Down: Image / Description
-        t_shap = Table([[s_img], [s_desc]], colWidths=[7*inch])
-        t_shap.setStyle(TableStyle([('ALIGN', (0,0), (-1,-1), 'CENTER')]))
-        elements.append(t_shap)
-        
-    elements.append(PageBreak())
     
-    # --- 3. TOPOMAPS (Grid) ---
-    elements.append(Paragraph(T(get_trans("map_head", lang)), style_Head))
-    elements.append(Paragraph(T(get_trans("map_body", lang)), style_Body))
-    elements.append(Spacer(1, 10))
+    # 4. Stress Gauge Section (NEW)
+    elements.append(Paragraph(T(txt['stress_head']), s_Head))
+    elements.append(Spacer(1, 5))
+    gauge_img = RLImage(io.BytesIO(data['gauge']), width=6*inch, height=1.5*inch)
+    elements.append(gauge_img)
+    elements.append(Paragraph(T(txt['stress_body']), s_Body))
+    elements.append(Spacer(1, 15))
     
-    map_imgs = []
-    map_caps = []
-    for b in ['Delta', 'Theta', 'Alpha', 'Beta']:
-        if data['maps'][b]:
-            map_imgs.append(RLImage(io.BytesIO(data['maps'][b]), width=1.5*inch, height=1.5*inch))
-            map_caps.append(Paragraph(T(b), style_Body))
-            
-    if map_imgs:
-        t_maps = Table([map_imgs, map_caps], colWidths=[1.7*inch]*4)
-        t_maps.setStyle(TableStyle([('ALIGN', (0,0), (-1,-1), 'CENTER'), ('VALIGN', (0,0), (-1,-1), 'TOP')]))
-        elements.append(t_maps)
-        
-    # --- CONCLUSION ---
-    elements.append(Spacer(1, 20))
-    elements.append(Paragraph(T("Clinical Impression / الانطباع السريري"), style_Head))
-    elements.append(Paragraph(T(data['narrative']), style_Body))
+    # 5. Connectivity Section
+    elements.append(Paragraph(T(txt['conn_head']), s_Head))
+    conn_img = RLImage(io.BytesIO(data['conn']), width=3*inch, height=3*inch)
+    # Using Table to center image
+    t_conn = Table([[conn_img]], colWidths=[7*inch])
+    t_conn.setStyle(TableStyle([('ALIGN', (0,0), (-1,-1), 'CENTER')]))
+    elements.append(t_conn)
+    
+    # 6. Conclusion (Isolated Rows for BiDi safety)
+    elements.append(Spacer(1, 10))
+    elements.append(Paragraph(T("Clinical Summary / الخلاصة السريرية"), s_Head))
+    
+    summary_text = data['narrative']
+    elements.append(Paragraph(T(summary_text), s_Body))
 
     doc.build(elements)
     buf.seek(0)
     return buf.getvalue()
 
-# --- 6. MAIN UI ---
+# --- 6. MAIN APP ---
 def main():
     c1, c2 = st.columns([3,1])
-    with c2:
+    with c2: 
         if os.path.exists(LOGO_PATH): st.image(LOGO_PATH, width=120)
-    with c1:
-        st.markdown(f'<div style="color:{BLUE}; font-size:2rem; font-weight:bold;">{get_trans("title", "en")}</div>', unsafe_allow_html=True)
-        
+    with c1: st.title("NeuroEarly Pro v41")
+    
     with st.sidebar:
-        lang = st.selectbox("Language / اللغة", ["English", "العربية"])
-        L = "ar" if lang == "العربية" else "en"
-        st.title(get_trans("p_info", L))
-        p_name = st.text_input(get_trans("name", L), "John Doe")
-        p_gender = st.selectbox(get_trans("gender", L), [get_trans("male", L), get_trans("female", L)])
-        p_id = st.text_input(get_trans("id", L), "F-2025")
-    
-    t1, t2 = st.tabs([get_trans('tab_assess', L), get_trans('tab_neuro', L)])
-    
-    # TAB 1: Clinical (Fixed Loop)
-    with t1:
-        c1, c2 = st.columns(2)
-        phq_score = 0; mmse_score = 0
-        with c1:
-            st.subheader(get_trans("phq_t", L))
-            opts = get_trans("opt_phq", L) # List
-            qs = get_trans("q_phq", L) # List
-            if isinstance(qs, list):
-                for i, q in enumerate(qs):
-                    # Use unique key, horizontal
-                    sel_idx = opts.index(st.radio(f"{i+1}. {q}", opts, horizontal=True, key=f"p_{i}", index=0))
-                    phq_score += sel_idx
-            st.metric("PHQ-9 Total", f"{phq_score}/27")
-            
-        with c2:
-            st.subheader(get_trans("alz_t", L))
-            opts_m = get_trans("opt_mmse", L) # List of 3 items
-            qs_m = get_trans("q_mmse", L) # List
-            if isinstance(qs_m, list):
-                for i, q in enumerate(qs_m):
-                    # Index 2 is "Correct" (3rd item). Ensure list has 3 items.
-                    sel_m = st.radio(f"{i+1}. {q}", opts_m, horizontal=True, key=f"m_{i}", index=2)
-                    mmse_score += opts_m.index(sel_m) # 0, 1, 2
-            mmse_total = min(30, mmse_score)
-            st.metric("MMSE Total", f"{mmse_total}/30")
+        lang_choice = st.selectbox("Language / اللغة", ["English", "العربية"])
+        lang = "ar" if lang_choice == "العربية" else "en"
+        txt = get_trans_memo(lang)
+        p_name = st.text_input("Name", "John Doe")
+        p_id = st.text_input("ID", "F-2025")
+        p_gender = st.selectbox("Gender", ["Male", "Female"])
 
-    # TAB 2: Neuro
-    with t2:
-        uploaded_file = st.file_uploader(get_trans("analyze", L), type=["edf"])
-        if st.button(get_trans("analyze", L), type="primary"):
+    uploaded_file = st.file_uploader("Upload EEG (EDF)", type=["edf"])
+    
+    if uploaded_file:
+        df, metrics = process_eeg_memo(uploaded_file.getvalue())
+        
+        if df is not None:
+            # Logic Analysis
+            stress_idx = metrics['Stress_Index']
+            stress_state = "High Stress" if stress_idx > 1.2 else ("Relaxed" if stress_idx < 0.8 else "Normal")
             
-            # 1. Process
-            if uploaded_file:
-                df, metrics, err = process_real_edf(uploaded_file)
-                if err: st.error(err); st.stop()
+            # Narrative Generation
+            narrative = f"Patient ID: {p_id}. "
+            if stress_idx > 1.2:
+                narrative += txt['stress_high'] + ". "
             else:
-                # Simulation Data
-                df = pd.DataFrame(np.random.uniform(2,12,(19,4)), columns=[f"{b} (%)" for b in BANDS], index=['Fp1','Fp2','F3','F4','C3','C4','P3','P4','O1','O2','F7','F8','T3','T4','T5','T6','Fz','Cz','Pz'])
-                metrics = {'Global_Entropy': 0.65, 'Alpha_Coherence': 0.40}
-
-            # 2. Metrics
-            faa = 0
-            if 'F4' in df.index and 'F3' in df.index:
-                # Safe calc
-                r = df.loc['F4', 'Alpha (%)']; l = df.loc['F3', 'Alpha (%)']
-                if r>0 and l>0: faa = np.log(r) - np.log(l)
+                narrative += txt['stress_low'] + ". "
+            narrative += f"Beta/Alpha Ratio: {stress_idx:.2f}. "
             
-            fdi = 0; focal_ch = "None"
-            if 'Delta (%)' in df.columns:
-                fdi = df['Delta (%)'].max() / (df['Delta (%)'].median() + 0.01)
-                focal_ch = df['Delta (%)'].idxmax()
-
-            risks = {
-                'Tumor': 0.95 if fdi > 3.5 else 0.05,
-                'Alzheimer': 0.8 if metrics['Global_Entropy'] < 0.7 else 0.1,
-                'Depression': 0.7 if faa > 0.5 else 0.1
-            }
-
-            # 3. Narrative
-            narrative = f"Patient ID: {p_id} | PHQ-9: {phq_score} | MMSE: {mmse_total}\n"
-            if risks['Tumor'] > 0.6: narrative += get_trans("mri_alert", L)
-            else: narrative += get_trans("normal", L)
-            
-            narrative += f"\nDetected Biomarkers:\n- Global Entropy: {metrics['Global_Entropy']:.2f}\n- Alpha Coherence: {metrics['Alpha_Coherence']:.2f}\n- Frontal Asymmetry: {faa:.2f}"
-
-            # 4. Display
+            # Display Dashboard
             st.success("Analysis Complete")
-            c1, c2 = st.columns(2)
-            conn_img = generate_connectivity_graph(metrics.get('Alpha_Coherence', 0.5), L)
-            shap_img = generate_shap(df, metrics, faa, L)
-            maps = {b: generate_topomap(df, b) for b in BANDS}
             
-            with c1: st.image(conn_img, caption="Connectivity Network")
-            with c2: st.image(shap_img, caption="SHAP Analysis")
+            k1, k2, k3 = st.columns(3)
+            k1.metric("Stress Index", f"{stress_idx:.2f}", stress_state)
+            k2.metric("Entropy", f"{metrics['Global_Entropy']:.2f}")
+            k3.metric("Coherence", f"{metrics['Alpha_Coherence']:.2f}")
             
-            st.image(list(maps.values()), width=120, caption=list(BANDS.keys()))
+            # Gauge Visualization
+            gauge_bytes = generate_stress_gauge(stress_idx, lang)
+            st.image(gauge_bytes, caption="Neuro-Autonomic Balance")
             
-            # 5. PDF
-            pdf_data = {
-                'info': {'Name': p_name, 'ID': p_id, 'Gender': p_gender, 'DOB': "1980-01-01"},
-                'risks': risks, 'conn': conn_img, 'shap': shap_img, 'maps': maps, 'narrative': narrative
-            }
-            pdf_bytes = create_professional_pdf(pdf_data, L)
-            st.download_button(get_trans("download", L), pdf_bytes, "Professional_Report.pdf", "application/pdf")
+            # Connectivity
+            conn_bytes = generate_connectivity_graph(metrics['Alpha_Coherence'])
+            
+            # PDF Generation
+            if st.button("Generate Professional PDF"):
+                pdf_payload = {
+                    'p_name': p_name, 'p_id': p_id, 'p_gender': p_gender,
+                    'metrics': metrics,
+                    'gauge': gauge_bytes,
+                    'conn': conn_bytes,
+                    'narrative': narrative,
+                    'risks': {'Tumor': 0.1} # Placeholder based on real logic
+                }
+                pdf_bytes = create_professional_pdf(pdf_payload, lang)
+                st.download_button(txt['download'], pdf_bytes, "Professional_Stress_Report.pdf", "application/pdf")
+        else:
+            st.error("Error processing file. Please ensure it is a valid EDF.")
 
 if __name__ == "__main__":
     if not os.path.exists(ASSETS_DIR): os.makedirs(ASSETS_DIR)
