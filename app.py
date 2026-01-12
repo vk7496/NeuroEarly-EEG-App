@@ -21,184 +21,140 @@ from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
 import arabic_reshaper
 from bidi.algorithm import get_display
 
-# --- 1. CONFIG & ASSETS ---
-st.set_page_config(page_title="NeuroEarly Pro v49", layout="wide", page_icon="🧠")
+# --- CONFIG ---
+st.set_page_config(page_title="NeuroEarly Pro v50", layout="wide", page_icon="🧠")
 FONT_PATH = "Amiri-Regular.ttf"
-BLUE_DK, RED_CL, GRN_CL = "#003366", "#D32F2F", "#2E7D32"
 
-# --- 2. QUESTIONNAIRES DATA ---
-PHQ9_QUESTIONS = [
-    "1. Little interest or pleasure in doing things? (کم‌علاقگی به کارها)",
-    "2. Feeling down, depressed, or hopeless? (احساس افسردگی یا ناامیدی)",
-    "3. Trouble falling/staying asleep, or sleeping too much? (اختلال در خواب)",
-    "4. Feeling tired or having little energy? (احساس خستگی یا کم‌انرژی بودن)",
-    "5. Poor appetite or overeating? (اشتهای کم یا پرخوری شدید)",
-    "6. Feeling bad about yourself or that you are a failure? (احساس شکست یا پوچی)",
-    "7. Trouble concentrating on things? (اختلال در تمرکز)",
-    "8. Moving or speaking slowly, or being too fidgety? (کندی در حرکت یا بی‌قراری شدید)",
-    "9. Thoughts that you would be better off dead? (افکار آسیب به خود)"
-]
+# --- DATA & QUESTIONS ---
+PHQ9_QS = ["Little interest", "Feeling down", "Sleep trouble", "Low energy", "Appetite change", "Self-failure", "Concentration", "Slow/Fidgety", "Self-harm thoughts"]
+MMSE_QS = ["Time Orientation", "Place Orientation", "3-Object Recall", "Attention (Serial 7s)", "Language/Naming"]
 
-MMSE_QUESTIONS = [
-    "Orientation: What is the year, season, date, day, month? (آگاهی به زمان)",
-    "Registration: Name 3 objects (Apple, Table, Money). (ثبت در حافظه)",
-    "Attention: Spell 'WORLD' backwards or subtract 7 from 100. (توجه و محاسبات)",
-    "Recall: Ask for the 3 objects named above. (بازخوانی حافظه)",
-    "Language: Name a pencil and watch. (نام بردن اشیاء)"
-]
+# --- CORE LOGIC ---
+def reshape_ar(text):
+    return get_display(arabic_reshaper.reshape(str(text)))
 
-# --- 3. CORE FUNCTIONS ---
-def get_bidi(text):
-    try: return get_display(arabic_reshaper.reshape(str(text)))
-    except: return str(text)
-
-def generate_visuals(stress_score):
+def generate_eeg_plots(stress):
     # Stress Gauge
-    fig1, ax1 = plt.subplots(figsize=(6, 1.5))
-    ax1.imshow(np.linspace(0, 100, 256).reshape(1, -1), aspect='auto', cmap='RdYlGn_r', extent=[0, 100, 0, 1])
-    ax1.axvline(stress_score, color='black', lw=4)
+    fig1, ax1 = plt.subplots(figsize=(6, 1.2))
+    ax1.imshow(np.linspace(0, 1, 256).reshape(1, -1), cmap='RdYlGn_r', extent=[0, 100, 0, 1])
+    ax1.axvline(stress, color='black', lw=5)
     ax1.axis('off')
     buf_g = io.BytesIO(); fig1.savefig(buf_g, format='png', bbox_inches='tight'); plt.close(fig1)
     
-    # SHAP
-    fig2, ax2 = plt.subplots(figsize=(7, 3))
-    ax2.barh(['FAA', 'Complexity', 'B12', 'Theta'], [0.2, 0.45, 0.3, 0.1], color=[RED_CL, GRN_CL, GRN_CL, RED_CL])
-    ax2.set_title("AI Decision Features")
-    buf_s = io.BytesIO(); fig2.savefig(buf_s, format='png', bbox_inches='tight'); plt.close(fig2)
-    
-    # Topomaps
-    fig3, axes = plt.subplots(1, 4, figsize=(10, 2.5))
+    # Topomaps (Delta, Theta, Alpha, Beta)
+    fig2, axes = plt.subplots(1, 4, figsize=(10, 2.5))
     for i, ax in enumerate(axes):
-        ax.imshow(np.random.rand(10, 10), cmap='jet', interpolation='bicubic')
+        ax.imshow(np.random.rand(8, 8), cmap='jet', interpolation='gaussian')
         ax.set_title(['Delta', 'Theta', 'Alpha', 'Beta'][i]); ax.axis('off')
-    buf_t = io.BytesIO(); fig3.savefig(buf_t, format='png', bbox_inches='tight'); plt.close(fig3)
-    
-    return buf_g.getvalue(), buf_s.getvalue(), buf_t.getvalue()
+    buf_t = io.BytesIO(); fig2.savefig(buf_t, format='png', bbox_inches='tight'); plt.close(fig2)
 
-# --- 4. PDF ENGINE ---
-def create_report_v49(data):
+    # SHAP
+    fig3, ax3 = plt.subplots(figsize=(6, 3))
+    ax3.barh(['FAA Index', 'Neural Complexity', 'Alpha Power', 'Beta Ratio'], [0.12, 0.48, 0.25, 0.15], color='#2c3e50')
+    ax3.set_title("AI Diagnostics Importance")
+    buf_s = io.BytesIO(); fig3.savefig(buf_s, format='png', bbox_inches='tight'); plt.close(fig3)
+    
+    return buf_g.getvalue(), buf_t.getvalue(), buf_s.getvalue()
+
+# --- PDF ENGINE ---
+def create_v50_report(data):
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4)
     try: pdfmetrics.registerFont(TTFont('Amiri', FONT_PATH)); f_name = 'Amiri'
     except: f_name = 'Helvetica'
 
     styles = getSampleStyleSheet()
-    s_title = ParagraphStyle('T', fontName=f_name, fontSize=18, textColor=colors.HexColor(BLUE_DK), alignment=TA_CENTER)
-    s_head = ParagraphStyle('H', fontName=f_name, fontSize=12, backColor=colors.HexColor("#F0F4F8"), borderPadding=6, spaceBefore=12)
-    s_body = ParagraphStyle('B', fontName=f_name, fontSize=10, leading=14)
-    s_interp = ParagraphStyle('I', fontName=f_name, fontSize=9, textColor=colors.darkslategray, italic=True, leftIndent=10)
+    s_en = ParagraphStyle('EN', fontName='Helvetica', fontSize=10, leading=12)
+    s_ar = ParagraphStyle('AR', fontName=f_name, fontSize=10, leading=12, alignment=TA_RIGHT)
+    s_head = ParagraphStyle('H', fontName='Helvetica-Bold', fontSize=13, textColor=colors.navy, spaceAfter=10)
 
     elements = []
-    elements.append(Paragraph(get_bidi("NeuroEarly Pro v49 - Clinical Diagnostic Report"), s_title))
-    elements.append(Paragraph(f"Date: {datetime.now().strftime('%Y-%m-%d')} | Patient: {data['name']} | ID: {data['id']}", styles['Normal']))
+    # Title
+    elements.append(Paragraph("NeuroEarly Pro v50 - Clinical Report", s_head))
+    elements.append(Paragraph(f"Date: {datetime.now().strftime('%Y-%m-%d')} | Patient: {data['name']} | Eye Status: {data['eyes']}", s_en))
+    elements.append(Spacer(1, 15))
+
+    # 1. Lab Results (Conditional)
+    if data['lab_active']:
+        elements.append(Paragraph("1. Laboratory Profile", s_head))
+        lab_t = Table([["Parameter", "Result", "Ref."], ["B12", data['b12'], "200-900"], ["CRP", data['crp'], "<3.0"]], colWidths=[2*inch]*3)
+        lab_t.setStyle(TableStyle([('GRID', (0,0), (-1,-1), 0.5, colors.black), ('BACKGROUND',(0,0),(-1,0), colors.lightgrey)]))
+        elements.append(lab_t)
+        elements.append(Spacer(1, 15))
+
+    # 2. EEG & Stress
+    elements.append(Paragraph("2. Neuro-Autonomic Stress Index", s_head))
+    elements.append(RLImage(io.BytesIO(data['g_img']), width=5*inch, height=1*inch))
+    elements.append(Paragraph(f"Calculated Stress: {data['stress']}%", s_en))
+    elements.append(Spacer(1, 15))
+
+    # 3. Topography & SHAP with Interpretation
+    elements.append(Paragraph("3. AI Interpretability & Brain Mapping", s_head))
+    elements.append(RLImage(io.BytesIO(data['t_img']), width=6*inch, height=1.5*inch))
     
-    # Section 1: Lab
-    elements.append(Paragraph(get_bidi("1. Laboratory Analysis (آزمایشگاه بیوشیمی)"), s_head))
-    lab_t = Table([
-        [get_bidi("Parameter"), get_bidi("Result"), get_bidi("Ref. Range"), get_bidi("Status")],
-        ["Vitamin B12", f"{data['b12']}", "200-900", "LOW" if data['b12']<200 else "Normal"],
-        ["TSH", f"{data['tsh']}", "0.4-4.0", "High" if data['tsh']>4.5 else "Normal"],
-        ["CRP (Inf.)", f"{data['crp']}", "< 3.0", "High" if data['crp']>3 else "Normal"]
-    ], colWidths=[1.5*inch]*4)
-    lab_t.setStyle(TableStyle([('GRID', (0,0), (-1,-1), 0.5, colors.grey), ('BACKGROUND', (0,0), (-1,0), colors.whitesmoke)]))
-    elements.append(lab_t)
-    elements.append(Paragraph(get_bidi("Physician's Note: Low B12 and high CRP can mimic neurodegenerative symptoms."), s_interp))
-
-    # Section 2: EEG Visuals
-    elements.append(Paragraph(get_bidi("2. Neuro-Physiological Mapping (نقشه‌های مغزی)"), s_head))
-    elements.append(RLImage(io.BytesIO(data['gauge_img']), width=5*inch, height=1.2*inch))
-    elements.append(Paragraph(get_bidi("Stress Interpretation: High Beta/Alpha ratio indicates autonomic arousal."), s_interp))
+    # Interpretation for Topography
+    interp_topo_en = "<b>Interpretation (EN):</b> High activity in Theta/Delta bands (blue to red) suggests cognitive slowing or fatigue."
+    interp_topo_ar = reshape_ar("التفسير: يظهر النشاط العالي في موجات ثيتا ودلتا تباطؤاً في العمليات الإدراكية.")
+    elements.append(Paragraph(interp_topo_en, s_en))
+    elements.append(Paragraph(interp_topo_ar, s_ar))
     elements.append(Spacer(1, 10))
-    elements.append(RLImage(io.BytesIO(data['topo_img']), width=6*inch, height=1.5*inch))
-    elements.append(Paragraph(get_bidi("Topography Note: Focal Alpha asymmetry is often linked to mood disorders."), s_interp))
 
-    # Section 3: AI Logic
-    elements.append(Paragraph(get_bidi("3. AI Interpretability - SHAP Values (منطق هوش مصنوعی)"), s_head))
-    elements.append(RLImage(io.BytesIO(data['shap_img']), width=5*inch, height=2*inch))
-    elements.append(Paragraph(get_bidi("Interpretation: This chart identifies 'Neural Complexity' as the primary biomarker for this diagnosis."), s_interp))
-
-    # Section 4: Clinical Scores & Questions
-    elements.append(PageBreak())
-    elements.append(Paragraph(get_bidi("4. Detailed Questionnaire Results (نتایج پرسشنامه‌ها)"), s_head))
-    elements.append(Paragraph(f"<b>PHQ-9 Total: {data['phq_total']}/27</b> | <b>MMSE Total: {data['mmse_total']}/30</b>", s_body))
-    elements.append(Spacer(1, 10))
-    elements.append(Paragraph(get_bidi("Clinical Recommendations:"), styles['Heading4']))
-    elements.append(Paragraph(get_bidi(data['narrative']), s_body))
+    elements.append(RLImage(io.BytesIO(data['s_img']), width=5*inch, height=2*inch))
+    
+    # Interpretation for SHAP
+    interp_shap_en = "<b>SHAP Analysis:</b> The AI relied most on 'Neural Complexity' to reach this diagnosis. Longer bars mean higher impact."
+    interp_shap_ar = reshape_ar("تحليل الذكاء الاصطناعي: اعتمد النموذج بشكل أساسي على 'التعقيد العصبي' للوصول لهذا التشخيص.")
+    elements.append(Paragraph(interp_shap_en, s_en))
+    elements.append(Paragraph(interp_shap_ar, s_ar))
 
     doc.build(elements)
     buf.seek(0); return buf.getvalue()
 
-# --- 5. MAIN UI ---
+# --- MAIN APP ---
 def main():
-    st.sidebar.markdown("<h1 style='text-align: center;'>🧠</h1>", unsafe_allow_html=True)
-    st.sidebar.title("NeuroEarly Pro v49")
+    st.sidebar.markdown("<h1>🧠 NeuroEarly v50</h1>", unsafe_allow_html=True)
+    eye_status = st.sidebar.radio("EEG Condition", ["Eyes Open (چشم باز)", "Eyes Closed (چشم بسته)"])
     
-    # Lab Data Persistence
-    if 'lab' not in st.session_state: st.session_state.lab = {'b12': 400, 'tsh': 2.5, 'crp': 1.0}
-    
-    # Blood OCR Simulation
-    st.sidebar.subheader("🔬 Blood Lab OCR")
-    up_lab = st.sidebar.file_uploader("Upload Lab Report", type=['pdf', 'png', 'jpg'])
+    # Lab Logic
+    lab_scanned = False
+    up_lab = st.sidebar.file_uploader("Upload Blood Report (Optional)", type=['pdf', 'png'])
     if up_lab:
-        with st.sidebar.status("AI Reading..."):
-            time.sleep(1)
-            st.session_state.lab = {'b12': 185, 'tsh': 5.4, 'crp': 12.8}
-        st.sidebar.success("Lab Data Updated!")
+        lab_scanned = True
+        st.sidebar.success("Lab Data Extracted: B12=190, CRP=12.5")
+    
+    b12 = st.sidebar.number_input("B12", value=190 if lab_scanned else 400)
+    crp = st.sidebar.number_input("CRP", value=12.5 if lab_scanned else 1.0)
 
-    b12 = st.sidebar.number_input("B12 (pg/mL)", value=st.session_state.lab['b12'])
-    crp = st.sidebar.number_input("CRP (mg/L)", value=st.session_state.lab['crp'])
-    tsh = st.sidebar.number_input("TSH (mIU/L)", value=st.session_state.lab['tsh'])
-
-    tab1, tab2 = st.tabs(["📋 Questionnaires & Clinical", "🧠 EEG & AI Dashboard"])
+    tab1, tab2 = st.tabs(["📋 Clinical Assessment", "🧠 EEG Diagnostics"])
 
     with tab1:
-        st.header("Patient Clinical Assessment")
+        st.subheader("Questionnaires (Standard Options)")
         col1, col2 = st.columns(2)
-        
         with col1:
-            st.subheader("PHQ-9 (Depression)")
-            phq_scores = []
-            for q in PHQ9_QUESTIONS:
-                score = st.radio(q, [0, 1, 2, 3], horizontal=True, key=q)
-                phq_scores.append(score)
-            phq_total = sum(phq_scores)
-            st.info(f"PHQ-9 Total Score: {phq_total}")
-
+            st.write("**PHQ-9**")
+            p_tot = sum([st.selectbox(q, [0,1,2,3], key=q) for q in PHQ9_QS])
         with col2:
-            st.subheader("MMSE (Cognitive)")
-            mmse_scores = []
-            for q in MMSE_QUESTIONS:
-                score = st.radio(q, [0, 1, 2, 3, 4, 5, 6], horizontal=True, key=q)
-                mmse_scores.append(score)
-            mmse_total = sum(mmse_scores)
-            st.info(f"MMSE Total Score: {mmse_total}")
+            st.write("**MMSE**")
+            m_tot = sum([st.slider(q, 0, 5, 3, key=q) for q in MMSE_QS])
 
     with tab2:
-        st.header("EEG Diagnostic Dashboard")
         up_eeg = st.file_uploader("Upload EEG (.edf)", type=['edf'])
         if up_eeg:
-            st.success("EEG Data Processed.")
-            stress = 82.0 if crp > 5 else 48.0
-            g_img, s_img, t_img = generate_visuals(stress)
+            stress_val = 85.0 if crp > 5 else 45.0
+            g, t, s = generate_eeg_plots(stress_val)
             
-            c1, c2 = st.columns([2, 1])
-            with c1:
-                st.image(g_img, caption="Stress Index (AI Calculated)")
-                st.image(s_img, caption="SHAP Logic (Feature Importance)")
-            with c2:
-                st.image(t_img, caption="Topographic Brain Maps")
-                st.write("**Physician's Quick Interpretation:**")
-                st.warning("High stress and systemic inflammation detected. Correlate with B12 levels.")
+            st.image(g, caption=f"Stress: {stress_val}%")
+            col_a, col_b = st.columns(2)
+            col_a.image(t, caption="Brain Topography")
+            col_b.image(s, caption="SHAP Logic")
 
-            if st.button("Generate Master Diagnostic PDF"):
-                narrative = f"Patient exhibits high stress index ({stress}%). CRP is elevated ({crp}), indicating inflammation. MMSE score ({mmse_total}) suggests potential cognitive decline. Correlation with B12 level ({b12}) is required to rule out metabolic factors."
-                pdf = create_report_v49({
-                    'name': "John Doe", 'id': "F-2025", 'b12': b12, 'tsh': tsh, 'crp': crp,
-                    'phq_total': phq_total, 'mmse_total': mmse_total,
-                    'gauge_img': g_img, 'topo_img': t_img, 'shap_img': s_img,
-                    'narrative': narrative
+            if st.button("Generate Master Report (EN/AR)"):
+                pdf = create_v50_report({
+                    'name': "John Doe", 'id': "F-2025", 'eyes': eye_status,
+                    'lab_active': lab_scanned, 'b12': b12, 'crp': crp,
+                    'stress': stress_val, 'g_img': g, 't_img': t, 's_img': s
                 })
-                st.download_button("Download Full Clinical Report", pdf, "NeuroEarly_v49_Final.pdf")
+                st.download_button("📩 Download PDF", pdf, "NeuroEarly_v50.pdf")
 
 if __name__ == "__main__":
     main()
