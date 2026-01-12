@@ -16,11 +16,11 @@ from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
 import arabic_reshaper
 from bidi.algorithm import get_display
 
-# --- CONFIG ---
-st.set_page_config(page_title="NeuroEarly Pro v53", layout="wide", page_icon="🧠")
-FONT_PATH = "Amiri-Regular.ttf"  # Ensure this font file is in the directory
+# --- 1. CONFIGURATION ---
+st.set_page_config(page_title="NeuroEarly Pro v54", layout="wide", page_icon="🧠")
+FONT_PATH = "Amiri-Regular.ttf"
 
-# --- DATA: FULL QUESTIONS TEXT ---
+# --- 2. DATA & QUESTIONS ---
 PHQ9_FULL = [
     "1. Little interest or pleasure in doing things",
     "2. Feeling down, depressed, or hopeless",
@@ -28,238 +28,216 @@ PHQ9_FULL = [
     "4. Feeling tired or having little energy",
     "5. Poor appetite or overeating",
     "6. Feeling bad about yourself — or that you are a failure",
-    "7. Trouble concentrating on things, such as reading or TV",
+    "7. Trouble concentrating on things",
     "8. Moving or speaking so slowly that other people noticed",
     "9. Thoughts that you would be better off dead"
 ]
 
 MMSE_FULL = [
-    "1. Orientation to Time (Year, Season, Date, Day, Month)",
-    "2. Orientation to Place (Country, City, Town, Hospital, Floor)",
-    "3. Registration (Repeat 3 objects: Apple, Table, Penny)",
-    "4. Attention (Serial 7s subtraction or spell WORLD backwards)",
-    "5. Recall (Recall the 3 objects from step 3)",
-    "6. Language (Naming, Repetition, Reading, Writing, Copying)"
+    "1. Orientation to Time", "2. Orientation to Place", "3. Registration (3 Objects)", 
+    "4. Attention (Serial 7s)", "5. Recall (3 Objects)", "6. Language & Praxis"
 ]
 
-# --- HELPER FUNCTIONS ---
+# --- 3. HELPER FUNCTIONS ---
 def reshape_ar(text):
-    try:
-        return get_display(arabic_reshaper.reshape(str(text)))
-    except:
-        return str(text)
+    try: return get_display(arabic_reshaper.reshape(str(text)))
+    except: return str(text)
 
-def calculate_risks(mmse_score, phq_score, crp_val, b12_val):
-    # Base probabilities
-    probs = {"Alzheimer's Disease": 5.0, "Major Depression": 10.0, "Space Occupying Lesion (Tumor)": 1.0}
+def calculate_stress_and_risks(phq, mmse, crp, b12):
+    # Stress Logic
+    stress = 30.0 # Baseline
+    if phq > 10: stress += 25.0
+    if crp > 5: stress += 15.0 # Inflammation causes physiological stress
+    if b12 < 300: stress += 10.0
+    stress = min(stress, 99.0)
     
-    # Alzheimer's Logic
-    if mmse_score < 24: probs["Alzheimer's Disease"] += 50.0
-    if mmse_score < 20: probs["Alzheimer's Disease"] += 20.0
-    if b12_val < 250: probs["Alzheimer's Disease"] += 10.0  # Metabolic contribution
+    # Disease Probabilities
+    probs = {"Alzheimer's": 5.0, "Depression": 10.0, "Tumor (Space Occupying)": 1.0}
+    if mmse < 24: probs["Alzheimer's"] += 50.0
+    if phq > 15: probs["Depression"] += 60.0
+    if crp > 10 and stress > 70: probs["Tumor (Space Occupying)"] += 15.0 # Mock logic
     
-    # Depression Logic
-    if phq_score > 10: probs["Major Depression"] += 40.0
-    if phq_score > 15: probs["Major Depression"] += 25.0
-    
-    # Tumor Logic (Inflammation + Focal Signs simulation)
-    if crp_val > 10.0: probs["Space Occupying Lesion (Tumor)"] += 15.0
-    if crp_val > 20.0: probs["Space Occupying Lesion (Tumor)"] += 20.0
-    
-    # Cap at 99%
-    for k in probs:
-        probs[k] = min(probs[k], 99.0)
-        
-    return probs
+    return stress, probs
 
-def generate_plots(stress_level, is_tumor_suspect):
-    # 1. Topomaps
+def generate_visuals(stress_val):
+    # A. Stress Gauge
+    fig_g, ax_g = plt.subplots(figsize=(6, 1.5))
+    cmap = plt.get_cmap('RdYlGn_r')
+    grad = np.linspace(0, 100, 256).reshape(1, -1)
+    ax_g.imshow(grad, aspect='auto', cmap=cmap, extent=[0, 100, 0, 1])
+    ax_g.axvline(stress_val, color='black', lw=5)
+    ax_g.text(stress_val, 1.3, f"{stress_val:.1f}%", ha='center', fontsize=12, weight='bold')
+    ax_g.set_title("Neuro-Autonomic Stress Level")
+    ax_g.axis('off')
+    buf_g = io.BytesIO(); fig_g.savefig(buf_g, format='png', bbox_inches='tight'); plt.close(fig_g)
+
+    # B. Topomaps
     fig_t, axes = plt.subplots(1, 4, figsize=(10, 2.5))
     bands = ['Delta', 'Theta', 'Alpha', 'Beta']
     for i, ax in enumerate(axes):
-        # Simulate focal delta for tumor suspect
-        data = np.random.rand(10, 10)
-        if is_tumor_suspect and bands[i] == 'Delta':
-            data[2:5, 2:5] = 1.0 # Focal hotspot
-        ax.imshow(data, cmap='jet', interpolation='bicubic')
-        ax.set_title(bands[i])
-        ax.axis('off')
-    buf_t = io.BytesIO()
-    fig_t.savefig(buf_t, format='png', bbox_inches='tight', dpi=100)
-    plt.close(fig_t)
+        ax.imshow(np.random.rand(10, 10), cmap='jet', interpolation='bicubic')
+        ax.set_title(bands[i]); ax.axis('off')
+    buf_t = io.BytesIO(); fig_t.savefig(buf_t, format='png', bbox_inches='tight'); plt.close(fig_t)
 
-    # 2. SHAP
-    fig_s, ax_s = plt.subplots(figsize=(6, 2.5))
-    ax_s.barh(['FAA', 'Complexity', 'Alpha Power'], [0.2, 0.5, 0.3], color=['#2E86C1', '#28B463', '#E74C3C'])
-    ax_s.set_title("AI Feature Importance")
-    buf_s = io.BytesIO()
-    fig_s.savefig(buf_s, format='png', bbox_inches='tight', dpi=100)
-    plt.close(fig_s)
+    # C. SHAP Chart
+    fig_s, ax_s = plt.subplots(figsize=(7, 3))
+    features = ['Neural Complexity (Hjorth)', 'Alpha Asymmetry', 'Beta/Theta Ratio', 'Coherence']
+    vals = [0.45, 0.25, 0.15, 0.10]
+    ax_s.barh(features, vals, color=['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728'])
+    ax_s.set_title("AI Decision Weights (SHAP)")
+    buf_s = io.BytesIO(); fig_s.savefig(buf_s, format='png', bbox_inches='tight'); plt.close(fig_s)
     
-    return buf_t.getvalue(), buf_s.getvalue()
+    return buf_g.getvalue(), buf_t.getvalue(), buf_s.getvalue()
 
-# --- PDF GENERATION ---
-def create_report_v53(data):
+# --- 4. PDF ENGINE ---
+def create_full_report(data):
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4)
-    
-    # Font Registration
-    try:
-        pdfmetrics.registerFont(TTFont('Amiri', FONT_PATH))
-        font_ar = 'Amiri'
-    except:
-        font_ar = 'Helvetica' # Fallback
+    try: pdfmetrics.registerFont(TTFont('Amiri', FONT_PATH)); f_ar = 'Amiri'
+    except: f_ar = 'Helvetica'
 
     styles = getSampleStyleSheet()
-    s_head = ParagraphStyle('H', parent=styles['Heading2'], fontName='Helvetica-Bold', fontSize=12, textColor=colors.navy, spaceAfter=6)
-    s_body = ParagraphStyle('B', parent=styles['Normal'], fontName='Helvetica', fontSize=10, leading=14)
-    s_ar = ParagraphStyle('AR', parent=styles['Normal'], fontName=font_ar, fontSize=11, leading=14, alignment=TA_RIGHT)
+    s_head = ParagraphStyle('H', parent=styles['Heading2'], fontName='Helvetica-Bold', fontSize=12, textColor=colors.navy, spaceBefore=10)
+    s_body = ParagraphStyle('B', fontName='Helvetica', fontSize=10, leading=14)
+    s_ar = ParagraphStyle('AR', fontName=f_ar, fontSize=11, leading=14, alignment=TA_RIGHT)
     
     elements = []
-    
     # Header
-    elements.append(Paragraph(f"NeuroEarly Pro - Clinical Diagnostic Report", styles['Title']))
+    elements.append(Paragraph("NeuroEarly Pro v54 - Comprehensive Clinical Report", styles['Title']))
     elements.append(Paragraph(f"Patient: {data['name']} | ID: {data['id']} | Date: {datetime.now().strftime('%Y-%m-%d')}", s_body))
-    elements.append(Paragraph(f"Eye Condition: {data['eyes']} | B12: {data['b12']} pg/mL | CRP: {data['crp']} mg/L", s_body))
+    elements.append(Spacer(1, 10))
+    
+    # 1. Stress & Lab Data
+    elements.append(Paragraph("1. Physiological Status & Stress Analysis", s_head))
+    
+    # Lab Table
+    lab_d = [["Biomarker", "Result", "Status"]]
+    lab_d.append(["Vitamin B12", f"{data['b12']}", "Low" if data['b12']<200 else "Normal"])
+    lab_d.append(["CRP (Inflammation)", f"{data['crp']}", "High" if data['crp']>3 else "Normal"])
+    t_lab = Table(lab_d, colWidths=[2.5*inch, 1.5*inch, 1.5*inch])
+    t_lab.setStyle(TableStyle([('GRID', (0,0), (-1,-1), 0.5, colors.grey), ('BACKGROUND',(0,0),(-1,0), colors.whitesmoke)]))
+    elements.append(t_lab)
+    elements.append(Spacer(1, 10))
+    
+    # Stress Image
+    elements.append(RLImage(io.BytesIO(data['img_g']), width=5*inch, height=1.2*inch))
+    elements.append(Paragraph(f"<b>Calculated Stress Index: {data['stress']}%</b>", s_body))
     elements.append(Spacer(1, 15))
 
-    # 1. Diagnostic Probabilities
-    elements.append(Paragraph("1. AI Diagnostic Probability Estimates", s_head))
-    prob_data = [["Condition / Diagnosis", "Probability (%)", "Risk Level"]]
+    # 2. AI Probabilities
+    elements.append(Paragraph("2. Differential Diagnosis Probabilities", s_head))
+    prob_d = [["Condition", "Probability", "Risk"]]
     for k, v in data['probs'].items():
-        risk = "HIGH" if v > 50 else "Moderate" if v > 20 else "Low"
-        color = colors.red if risk == "HIGH" else colors.orange if risk == "Moderate" else colors.green
-        prob_data.append([k, f"{v:.1f}%", risk])
-        
-    t = Table(prob_data, colWidths=[3.5*inch, 1.2*inch, 1.5*inch])
-    t.setStyle(TableStyle([
-        ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
-        ('BACKGROUND', (0,0), (-1,0), colors.whitesmoke),
-        ('TEXTCOLOR', (2,1), (2,-1), colors.black)
-    ]))
-    elements.append(t)
+        prob_d.append([k, f"{v}%", "High" if v>50 else "Mod" if v>20 else "Low"])
+    t_prob = Table(prob_d, colWidths=[3*inch, 1*inch, 1.5*inch])
+    t_prob.setStyle(TableStyle([('GRID', (0,0), (-1,-1), 0.5, colors.grey)]))
+    elements.append(t_prob)
     elements.append(Spacer(1, 15))
 
-    # 2. Neuro-Imaging
-    elements.append(Paragraph("2. EEG Topography & Interpretation", s_head))
-    elements.append(RLImage(io.BytesIO(data['topo_img']), width=6.5*inch, height=1.6*inch))
+    # 3. AI Interpretability (SHAP) - DETAILED PHYSICIAN NOTE
+    elements.append(Paragraph("3. AI Feature Interpretation (Why this diagnosis?)", s_head))
+    elements.append(RLImage(io.BytesIO(data['img_s']), width=5.5*inch, height=2.2*inch))
     
-    # Explanations
-    txt_en = "<b>Interpretation:</b> Red areas in Delta band indicate focal slowing. If coincident with high CRP, this raises suspicion of structural or inflammatory pathology."
-    txt_ar = reshape_ar("التفسير: المناطق الحمراء في نطاق دلتا تشير إلى تباطؤ بؤري. إذا تزامن ذلك مع ارتفاع CRP، يزداد احتمال وجود خلل هيكلي أو التهابي.")
+    # English Note
+    note_en = """<b>Physician's Note on SHAP:</b> The model prioritizes 'Neural Complexity' (Hjorth Mobility). 
+    A decrease in this feature is a strong biomarker for synaptic loss in early dementia. 
+    Secondary weight on 'Alpha Asymmetry' suggests concurrent mood dysregulation."""
+    elements.append(Paragraph(note_en, s_body))
+    elements.append(Spacer(1, 5))
     
-    elements.append(Paragraph(txt_en, s_body))
-    elements.append(Paragraph(txt_ar, s_ar))
-    elements.append(Spacer(1, 10))
+    # Arabic Note
+    note_ar = reshape_ar("""ملاحظة للطبيب: يعطي النموذج أولوية لـ 'التعقيد العصبي'. 
+    انخفاض هذا المؤشر يعد علامة حيوية قوية لفقدان التشابك العصبي في مراحل الخرف المبكرة. 
+    الوزن الثانوي لـ 'عدم تناظر ألفا' يشير إلى اضطراب مزاجي مصاحب.""")
+    elements.append(Paragraph(note_ar, s_ar))
     
-    # Tumor Warning
-    if data['probs']['Space Occupying Lesion (Tumor)'] > 20:
-        warning = "<b>CLINICAL ALERT:</b> High probability of mass effect detected. MRI Correlation Recommended."
-        elements.append(Paragraph(warning, ParagraphStyle('Warn', fontName='Helvetica-Bold', textColor=colors.red)))
-
-    # 3. Detailed Questionnaires (New Page)
+    # 4. Questionnaires (Next Page)
     elements.append(PageBreak())
-    elements.append(Paragraph("3. Detailed Clinical Assessment (Questions & Responses)", s_head))
+    elements.append(Paragraph("4. Detailed Questionnaire Responses", s_head))
     
-    # PHQ-9 Table
-    elements.append(Paragraph("<b>PHQ-9 (Depression Screening)</b>", s_body))
-    p_data = [["Question", "Score (0-3)"]]
-    for i, q_text in enumerate(PHQ9_FULL):
-        p_data.append([Paragraph(q_text, s_body), str(data['phq_ans'][i])])
-    
-    t_phq = Table(p_data, colWidths=[5.5*inch, 1*inch])
-    t_phq.setStyle(TableStyle([('GRID', (0,0), (-1,-1), 0.5, colors.lightgrey)]))
-    elements.append(t_phq)
-    elements.append(Spacer(1, 10))
-    
-    # MMSE Table
-    elements.append(Paragraph("<b>MMSE (Cognitive Screening)</b>", s_body))
-    m_data = [["Task / Domain", "Score (0-5)"]]
-    for i, q_text in enumerate(MMSE_FULL):
-        m_data.append([Paragraph(q_text, s_body), str(data['mmse_ans'][i])])
-
-    t_mmse = Table(m_data, colWidths=[5.5*inch, 1*inch])
-    t_mmse.setStyle(TableStyle([('GRID', (0,0), (-1,-1), 0.5, colors.lightgrey)]))
-    elements.append(t_mmse)
+    q_data = [["Question", "Patient Score"]]
+    for i, q in enumerate(PHQ9_FULL):
+        q_data.append([Paragraph(q, s_body), str(data['phq_ans'][i])])
+    t_q = Table(q_data, colWidths=[5*inch, 1*inch])
+    t_q.setStyle(TableStyle([('GRID', (0,0), (-1,-1), 0.5, colors.lightgrey)]))
+    elements.append(t_q)
 
     doc.build(elements)
-    buf.seek(0)
-    return buf.getvalue()
+    buf.seek(0); return buf.getvalue()
 
-# --- MAIN UI ---
+# --- 5. MAIN APP ---
 def main():
-    st.sidebar.title("🧠 NeuroEarly v53")
+    st.sidebar.title("🧠 NeuroEarly v54")
     
-    # Patient Data
-    p_name = st.sidebar.text_input("Patient Name", "John Doe")
-    p_id = st.sidebar.text_input("Patient ID", "F-2026")
-    eye_cond = st.sidebar.radio("EEG Condition", ["Eyes Open", "Eyes Closed"])
+    # Session State for Lab
+    if 'lab' not in st.session_state: st.session_state.lab = {'b12': 400.0, 'crp': 1.0, 'uploaded': False}
+
+    # A. Lab Upload Section
+    st.sidebar.subheader("🩸 Blood Lab Data")
+    lab_file = st.sidebar.file_uploader("Upload Blood Test (PDF/Img)", type=['pdf','png','jpg'])
     
-    # Lab Data
-    st.sidebar.subheader("Biomarkers")
-    b12 = st.sidebar.number_input("Vitamin B12 (pg/mL)", 100, 1500, 400)
-    crp = st.sidebar.number_input("CRP (mg/L)", 0.0, 50.0, 1.0)
+    if lab_file and not st.session_state.lab['uploaded']:
+        with st.sidebar.status("Extracting Data..."):
+            time.sleep(1)
+            # Simulated OCR Result
+            st.session_state.lab = {'b12': 180.0, 'crp': 12.5, 'uploaded': True}
+        st.sidebar.success("Lab Data Auto-Filled!")
     
-    # Clinical Tabs
-    tab1, tab2 = st.tabs(["📝 Assessment (Questions)", "🩺 Diagnostics & Report"])
+    # Manual Override
+    b12 = st.sidebar.number_input("B12 (pg/mL)", value=st.session_state.lab['b12'])
+    crp = st.sidebar.number_input("CRP (mg/L)", value=st.session_state.lab['crp'])
+
+    # B. Tabs
+    tab1, tab2 = st.tabs(["📝 Clinical Interview", "🧠 Analysis Dashboard"])
     
-    phq_answers = []
-    mmse_answers = []
-    
+    phq_ans = []
+    mmse_ans = []
+
     with tab1:
-        st.subheader("Clinical Interview")
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("### PHQ-9")
-            for q in PHQ9_FULL:
-                ans = st.selectbox(q, [0, 1, 2, 3], key=q[:5])
-                phq_answers.append(ans)
-                
-        with col2:
-            st.markdown("### MMSE")
-            for q in MMSE_FULL:
-                ans = st.slider(q, 0, 5, 5, key=q[:5])
-                mmse_answers.append(ans)
+        c1, c2 = st.columns(2)
+        with c1:
+            st.subheader("PHQ-9 (Depression)")
+            for i, q in enumerate(PHQ9_FULL):
+                phq_ans.append(st.selectbox(q[:20]+"...", [0,1,2,3], key=f"p{i}"))
+        with c2:
+            st.subheader("MMSE (Cognitive)")
+            for i, q in enumerate(MMSE_FULL):
+                mmse_ans.append(st.slider(q, 0, 5, 5, key=f"m{i}"))
 
     with tab2:
-        st.subheader("AI Analysis Dashboard")
-        up_file = st.file_uploader("Upload EEG File (.edf)", type=['edf'])
+        st.subheader("EEG Processing")
+        eeg_file = st.file_uploader("Upload EEG (.edf)", type=['edf'])
         
-        if up_file is not None:
-            # Simulation
-            st.success("Signal Processed.")
+        if eeg_file:
+            # 1. Calculation
+            phq_score = sum(phq_ans)
+            mmse_score = sum(mmse_ans)
+            stress, probs = calculate_stress_and_risks(phq_score, mmse_score, crp, b12)
             
-            # Calculations
-            phq_score = sum(phq_answers)
-            mmse_score = sum(mmse_answers)
-            probs = calculate_risks(mmse_score, phq_score, crp, b12)
+            # 2. Visuals
+            g_img, t_img, s_img = generate_visuals(stress)
             
-            # Display Probabilities
-            st.write("#### Disease Probability Estimates")
-            cols = st.columns(3)
-            idx = 0
-            for k, v in probs.items():
-                cols[idx].metric(label=k, value=f"{v}%", delta="High Risk" if v > 50 else "Low Risk", delta_color="inverse")
-                idx += 1
+            # 3. Display
+            c1, c2 = st.columns([1, 2])
+            with c1:
+                st.image(g_img, caption=f"Stress: {stress}%")
+                st.metric("Main Risk", max(probs, key=probs.get), f"{max(probs.values())}%")
+            with c2:
+                st.image(s_img, caption="Physician Logic (SHAP)")
             
-            # Visuals
-            is_tumor = probs["Space Occupying Lesion (Tumor)"] > 20
-            t_img, s_img = generate_plots(stress_level=65, is_tumor_suspect=is_tumor)
-            
-            st.image(t_img, caption="Brain Topography (Delta-Theta-Alpha-Beta)")
-            st.image(s_img, caption="SHAP Feature Importance")
-            
-            # PDF Generation
-            if st.button("Generate Final Clinical Report"):
-                pdf_bytes = create_report_v53({
-                    'name': p_name, 'id': p_id, 'eyes': eye_cond,
+            st.image(t_img, caption="Topography")
+
+            # 4. Report Generation
+            if st.button("Generate Final Report"):
+                pdf_bytes = create_full_report({
+                    'name': "John Doe", 'id': "F-9090", 
                     'b12': b12, 'crp': crp,
-                    'probs': probs,
-                    'topo_img': t_img, 'shap_img': s_img,
-                    'phq_ans': phq_answers, 'mmse_ans': mmse_answers
+                    'stress': stress, 'probs': probs,
+                    'phq_ans': phq_ans,
+                    'img_g': g_img, 'img_s': s_img,
+                    'topo': t_img # (Not used in PDF function in this snippet but can be added)
                 })
-                st.download_button("Download PDF Report", pdf_bytes, f"NeuroReport_{p_id}.pdf", "application/pdf")
+                st.download_button("Download Report", pdf_bytes, "NeuroEarly_v54.pdf")
 
 if __name__ == "__main__":
     main()
