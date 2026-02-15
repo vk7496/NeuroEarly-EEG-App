@@ -3,7 +3,6 @@ import hashlib
 import numpy as np
 import streamlit as st
 from datetime import datetime
-import matplotlib.subplots as subplots
 import matplotlib.pyplot as plt
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -12,7 +11,7 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RL
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 # --- 1. INITIAL CONFIGURATION ---
-st.set_page_config(page_title="NeuroEarly v103 Pro", layout="wide", page_icon="🧠")
+st.set_page_config(page_title="NeuroEarly v104 Pro", layout="wide", page_icon="🧠")
 
 # Prevent memory overlap for new files
 if "current_file_hash" not in st.session_state:
@@ -116,7 +115,7 @@ def create_pdf_report(data):
     elements = []
     
     # Header Section
-    elements.append(Paragraph("NeuroEarly v103 - Complete Clinical Report", title_style))
+    elements.append(Paragraph("NeuroEarly v104 - Complete Clinical Report", title_style))
     elements.append(Paragraph(f"<b>Patient Name:</b> {data['name']} | <b>DOB:</b> {data['dob']} | <b>ID:</b> {data['id']}", body_style))
     elements.append(Paragraph(f"<b>Date of Analysis:</b> {datetime.now().strftime('%Y-%m-%d')} | <b>Blood CRP:</b> {data['crp']} mg/L", body_style))
     elements.append(Spacer(1, 15))
@@ -171,7 +170,7 @@ def create_pdf_report(data):
 
 # --- 6. MAIN DASHBOARD ---
 def main():
-    st.title("🧠 NeuroEarly Pro v103")
+    st.title("🧠 NeuroEarly Pro v104")
     
     # --- SIDEBAR: Patient Profile ---
     st.sidebar.header("👤 Patient Profile")
@@ -233,7 +232,7 @@ def main():
                 st.image(img_t, caption="Brain Topography Map (Frequency Bands)")
                 st.image(img_x, caption="Explainable AI (XAI) Feature Importance")
 
-            # 4. DOWNLOAD BUTTON (Fixed Logic)
+            # 4. DOWNLOAD BUTTON
             st.markdown("---")
             st.write("### Generate Medical Report")
             
@@ -246,7 +245,6 @@ def main():
             # Create PDF Buffer
             pdf_buffer = create_pdf_report(report_data)
             
-            # The official Streamlit way to download files without errors
             st.download_button(
                 label="📥 Download Complete Clinical Report (PDF)",
                 data=pdf_buffer,
